@@ -50,6 +50,9 @@
 #include "l2c_int.h"
 #include "osi/include/osi.h"
 #include "device/include/interop_config.h"
+#include "btif_av_co.h"
+#include "btif_av.h"
+#include <hardware/bt_av.h>
 
 static void btm_read_remote_features(uint16_t handle);
 static void btm_read_remote_ext_features(uint16_t handle, uint8_t page_number);
@@ -263,7 +266,10 @@ void btm_acl_created(const RawAddress& bda, DEV_CLASS dc, BD_NAME bdn,
 
       if (dc) memcpy(p->remote_dc, dc, DEV_CLASS_LEN);
 
-      if (bdn) memcpy(p->remote_name, bdn, BTM_MAX_REM_BD_NAME_LEN);
+      if (bdn) {
+           memcpy(p->remote_name, bdn, BTM_MAX_REM_BD_NAME_LEN);
+           p->remote_name[BTM_MAX_REM_BD_NAME_LEN] = '\0';
+      }
 
       /* if BR/EDR do something more */
       if (transport == BT_TRANSPORT_BR_EDR) {
@@ -548,6 +554,39 @@ tBTM_STATUS BTM_GetRole(const RawAddress& remote_bd_addr, uint8_t* p_role) {
 
 /*******************************************************************************
  *
+ * Function         IsHighQualityCodecSelected
+ *
+ * Description      This function is called to check whether high quality
+ *                  codec selected(Aptx-HD, LDAC)
+ *
+ * Returns          true if Aptx-HD or LDAC codec selected.
+ *                  false if any other codec selcted.
+ *
+ ******************************************************************************/
+bool IsHighQualityCodecSelected(const RawAddress& remote_bd_addr) {
+  BTM_TRACE_DEBUG("%s: RemBdAddr: %s", __func__, remote_bd_addr.ToString().c_str());
+
+  if (btif_av_is_device_connected(remote_bd_addr)) {
+    A2dpCodecConfig* current_codec = bta_av_get_a2dp_current_codec();
+    btav_a2dp_codec_config_t codec_config;
+    codec_config = current_codec->getCodecConfig();
+
+    //get the current codec config, so that we can get the codec type.
+    BTM_TRACE_DEBUG("%s: codec_config.codec_type:%d", __func__, codec_config.codec_type);
+    if ((codec_config.codec_type == BTAV_A2DP_CODEC_INDEX_SOURCE_LDAC) ||
+        (codec_config.codec_type == BTAV_A2DP_CODEC_INDEX_SOURCE_APTX_HD)) {
+      BTM_TRACE_DEBUG("%s: LDAC or APTX-HD codec selcted:", __func__);
+      return true;
+    } else {
+      return false;
+    }
+  } else {
+      return false;
+  }
+}
+
+/*******************************************************************************
+ *
  * Function         BTM_SwitchRole
  *
  * Description      This function is called to switch role between master and
@@ -602,7 +641,8 @@ tBTM_STATUS BTM_SwitchRole(const RawAddress& remote_bd_addr, uint8_t new_role,
     if ((p->link_role == new_role) ||
         (interop_database_match_addr(
                 INTEROP_DISABLE_ROLE_SWITCH, &remote_bd_addr)) ||
-                (!btm_cb.is_wifi_connected && (btm_get_bredr_acl_count() <= 1)))
+                (!btm_cb.is_wifi_connected && (btm_get_bredr_acl_count() <= 1) &&
+                (!IsHighQualityCodecSelected(remote_bd_addr))))
       return(BTM_SUCCESS);
 
   /* Ignore role switch request if the previous request was not completed */
@@ -2143,7 +2183,7 @@ void btm_flow_spec_complete(uint8_t status, uint16_t handle,
  *
  ******************************************************************************/
 tBTM_STATUS BTM_ReadRSSI(const RawAddress& remote_bda, tBTM_CMPL_CB* p_cb) {
-  tACL_CONN* p;
+  tACL_CONN* p = NULL;
   tBT_TRANSPORT transport = BT_TRANSPORT_BR_EDR;
   tBT_DEVICE_TYPE dev_type;
   tBLE_ADDR_TYPE addr_type;
@@ -2152,9 +2192,25 @@ tBTM_STATUS BTM_ReadRSSI(const RawAddress& remote_bda, tBTM_CMPL_CB* p_cb) {
   if (btm_cb.devcb.p_rssi_cmpl_cb) return (BTM_BUSY);
 
   BTM_ReadDevInfo(remote_bda, &dev_type, &addr_type);
-  if (dev_type == BT_DEVICE_TYPE_BLE) transport = BT_TRANSPORT_LE;
+  BTM_TRACE_DEBUG("BTM_ReadRSSI dev type: %d", dev_type);
 
-  p = btm_bda_to_acl(remote_bda, transport);
+  if (dev_type == BT_DEVICE_TYPE_DUMO) {
+    p = btm_bda_to_acl(remote_bda, transport);
+
+    /* If there is no BR EDR link found for Dual mode device, then set transport to BLE */
+    if (p == NULL)
+    {
+      BTM_TRACE_WARNING("BTM_ReadRSSI BR/EDR link is not found");
+      transport = BT_TRANSPORT_LE;
+    }
+  } else if (dev_type == BT_DEVICE_TYPE_BLE) {
+    transport = BT_TRANSPORT_LE;
+  }
+
+  if (p == NULL) {
+    p = btm_bda_to_acl(remote_bda, transport);
+  }
+
   if (p != (tACL_CONN*)NULL) {
     btm_cb.devcb.p_rssi_cmpl_cb = p_cb;
     alarm_set_on_mloop(btm_cb.devcb.read_rssi_timer, BTM_DEV_REPLY_TIMEOUT_MS,
@@ -2749,15 +2805,18 @@ void btm_cont_rswitch(tACL_CONN* p, tBTM_SEC_DEV_REC* p_dev_rec,
  *
  * Description      send pending page request
  *
+ * Parameters       target_bda - the addr we need to skip and remove
+ *                               when resubmiting connect page
+ *                  skip_connect_page - skip target_bda or not
+ *
  ******************************************************************************/
-void btm_acl_resubmit_page(void) {
+void btm_acl_resubmit_page(const RawAddress& target_bda, bool skip_connect_page) {
   tBTM_SEC_DEV_REC* p_dev_rec;
   BT_HDR* p_buf;
   uint8_t* pp;
   BTM_TRACE_DEBUG("btm_acl_resubmit_page");
   /* If there were other page request schedule can start the next one */
-  p_buf = (BT_HDR*)fixed_queue_try_dequeue(btm_cb.page_queue);
-  if (p_buf != NULL) {
+  while ((p_buf = (BT_HDR*)fixed_queue_try_dequeue(btm_cb.page_queue)) != NULL) {
     /* skip 3 (2 bytes opcode and 1 byte len) to get to the bd_addr
      * for both create_conn and rmt_name */
     pp = (uint8_t*)(p_buf + 1) + p_buf->offset + 3;
@@ -2765,15 +2824,37 @@ void btm_acl_resubmit_page(void) {
     RawAddress bda;
     STREAM_TO_BDADDR(bda, pp);
 
+    if (skip_connect_page && bda == target_bda &&
+        HCI_GET_CMD_HDR_OPCODE(p_buf) == HCI_CREATE_CONNECTION) {
+      BTM_TRACE_WARNING("%s: remove bda= %s", __func__, bda.ToString().c_str());
+      osi_free(p_buf);
+      p_buf = NULL;
+      continue;
+    }
+
     p_dev_rec = btm_find_or_alloc_dev(bda);
 
     btm_cb.connecting_bda = p_dev_rec->bd_addr;
     memcpy(btm_cb.connecting_dc, p_dev_rec->dev_class, DEV_CLASS_LEN);
 
     btu_hcif_send_cmd(LOCAL_BR_EDR_CONTROLLER_ID, p_buf);
-  } else {
+    break;
+  }
+
+  if (p_buf == NULL) {
     btm_cb.paging = false;
   }
+}
+
+/*******************************************************************************
+ *
+ * Function         btm_acl_resubmit_page
+ *
+ * Description      send pending page request
+ *
+ ******************************************************************************/
+void btm_acl_resubmit_page(void) {
+  return btm_acl_resubmit_page(RawAddress::kEmpty, false);
 }
 
 /*******************************************************************************
