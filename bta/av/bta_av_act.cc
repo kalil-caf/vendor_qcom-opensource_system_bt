@@ -1,6 +1,35 @@
 /******************************************************************************
- * Copyright (C) 2017, The Linux Foundation. All rights reserved.
- * Not a Contribution.
+ *  Copyright (C) 2017, The Linux Foundation. All rights reserved.
+ *  Not a Contribution.
+ *  Redistribution and use in source and binary forms, with or without
+ *  modification, are permitted (subject to the limitations in the
+ *  disclaimer below) provided that the following conditions are met:
+
+    * Redistributions of source code must retain the above copyright
+      notice, this list of conditions and the following disclaimer.
+
+    * Redistributions in binary form must reproduce the above
+      copyright notice, this list of conditions and the following
+      disclaimer in the documentation and/or other materials provided
+      with the distribution.
+
+    * Neither the name of The Linux Foundation nor the names of its
+      contributors may be used to endorse or promote products derived
+      from this software without specific prior written permission.
+
+ *  NO EXPRESS OR IMPLIED LICENSES TO ANY PARTY'S PATENT RIGHTS ARE
+ *  GRANTED BY THIS LICENSE. THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT
+ *  HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED
+ *  WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF
+ *  MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
+ *  IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR
+ *  ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ *  DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE
+ *  GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+ *  INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER
+ *  IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
+ *  OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN
+ *  IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  ******************************************************************************/
 /******************************************************************************
  *
@@ -59,6 +88,10 @@
 #define BTA_AV_SIGNALLING_TIMEOUT_MS (8 * 1000) /* 8 seconds */
 #endif
 
+#ifndef BTA_AV_BROWSINIG_CHANNEL_INT_TIMEOUT_MS
+#define BTA_AV_BROWSINIG_CHANNEL_INT_TIMEOUT_MS (1000) /* 1 second */
+#endif
+
 /* Time to wait for signalling from SNK when it is initiated from SNK. */
 /* If not, we will start signalling from SRC. */
 #ifndef BTA_AV_ACCEPT_SIGNALLING_TIMEOUT_MS
@@ -76,9 +109,9 @@ struct blacklist_entry
 };
 
 extern fixed_queue_t* btu_bta_alarm_queue;
-
+static void bta_av_browsing_channel_open_retry(uint8_t handle);
 static void bta_av_accept_signalling_timer_cback(void* data);
-
+static void bta_av_browsing_channel_open_timer_cback(void* data);
 #ifndef AVRC_MIN_META_CMD_LEN
 #define AVRC_MIN_META_CMD_LEN 20
 #endif
@@ -247,7 +280,13 @@ static void bta_av_rc_ctrl_cback(uint8_t handle, uint8_t event,
   } else if (event == AVRC_CLOSE_IND_EVT) {
     msg_event = BTA_AV_AVRC_CLOSE_EVT;
   } else if (event == AVRC_BROWSE_OPEN_IND_EVT) {
-    msg_event = BTA_AV_AVRC_BROWSE_OPEN_EVT;
+      if (result != 0) {
+        bta_av_browsing_channel_open_retry(handle);
+        return;
+      }
+      else {
+        msg_event = BTA_AV_AVRC_BROWSE_OPEN_EVT;
+      }
   } else if (event == AVRC_BROWSE_CLOSE_IND_EVT) {
     msg_event = BTA_AV_AVRC_BROWSE_CLOSE_EVT;
   }
@@ -378,6 +417,7 @@ uint8_t bta_av_rc_create(tBTA_AV_CB* p_cb, uint8_t role, uint8_t shdl,
   p_rcb->shdl = shdl;
   p_rcb->lidx = lidx;
   p_rcb->peer_features = 0;
+  p_rcb->cover_art_psm = 0;
   if (lidx == (BTA_AV_NUM_LINKS + 1)) {
     /* this LIDX is reserved for the AVRCP ACP connection */
     p_cb->rc_acp_handle = p_rcb->handle;
@@ -391,7 +431,29 @@ uint8_t bta_av_rc_create(tBTA_AV_CB* p_cb, uint8_t role, uint8_t shdl,
 
   return rc_handle;
 }
+#if (TWS_ENABLED == TRUE)
+/*******************************************************************************
+ *
+ * Function         bta_av_valid_twsplus_command
+ *
+ * Description      Check if it is TWS Pluse command
+ *
+ * Returns          BTA_AV_RSP_ACCEPT or BTA_AV_RSP_NOT_IMPL.
+ *
+ *****************************************************************************/
+static tBTA_AV_CODE bta_av_is_twsplus_command(uint8_t *p_data) {
+ tBTA_AV_CODE ret = BTA_AV_RSP_NOT_IMPL;
+  uint8_t* p_ptr = p_data;
+  uint32_t u32;
 
+  BTA_AV_BE_STREAM_TO_CO_ID(u32, p_ptr);
+  if (u32 == AVRC_CO_QTI) {
+    APPL_TRACE_IMP("%s: TWS passthrough cmd",__func__);
+    ret = BTA_AV_RSP_ACCEPT;
+  }
+  return ret;
+}
+#endif
 /*******************************************************************************
  *
  * Function         bta_av_valid_group_navi_msg
@@ -574,6 +636,7 @@ void bta_av_rc_opened(tBTA_AV_CB* p_cb, tBTA_AV_DATA* p_data) {
 
   rc_open.peer_addr = p_data->rc_conn_chg.peer_addr;
   rc_open.peer_features = p_cb->rcb[i].peer_features;
+  rc_open.cover_art_psm = p_cb->rcb[i].cover_art_psm;
   rc_open.status = BTA_AV_SUCCESS;
   APPL_TRACE_DEBUG("%s local features:x%x peer_features:x%x", __func__,
                    p_cb->features, rc_open.peer_features);
@@ -600,8 +663,30 @@ void bta_av_rc_opened(tBTA_AV_CB* p_cb, tBTA_AV_DATA* p_data) {
       (rc_open.peer_features & BTA_AV_FEAT_BROWSE) &&
       ((p_cb->rcb[i].status & BTA_AV_RC_ROLE_MASK) == BTA_AV_RC_ROLE_INT)) {
     APPL_TRACE_DEBUG("%s opening AVRC Browse channel", __func__);
-    AVRC_OpenBrowse(p_data->rc_conn_chg.handle, AVCT_INT);
+
+    if (interop_match_addr(INTEROP_AVRCP_BROWSE_OPEN_CHANNEL_COLLISION, &p_data->rc_conn_chg.peer_addr)) {
+      alarm_set_on_mloop(p_cb->browsing_channel_open_timer,
+                                 BTA_AV_BROWSINIG_CHANNEL_INT_TIMEOUT_MS,
+                                 bta_av_browsing_channel_open_timer_cback,
+                                 UINT_TO_PTR(p_data->rc_conn_chg.handle));
+    }
+    else {
+      AVRC_OpenBrowse(p_data->rc_conn_chg.handle, AVCT_INT);
+    }
   }
+}
+/*******************************************************************************
+ *
+ * Function         bta_av_browsing_channel_open_timer_cback
+ *
+ * Description      Send AVRCP command to open browsing channel after timer expires.
+ *
+ * Returns          void
+ *
+ ******************************************************************************/
+static void bta_av_browsing_channel_open_timer_cback(void* data) {
+  uint32_t handle = PTR_TO_UINT(data);
+  AVRC_OpenBrowse(handle, AVCT_INT);
 }
 
 /*******************************************************************************
@@ -925,8 +1010,17 @@ void bta_av_rc_msg(tBTA_AV_CB* p_cb, tBTA_AV_DATA* p_data) {
                        "false");
       if (p_data->rc_msg.msg.pass.op_id == AVRC_ID_VENDOR) {
         p_data->rc_msg.msg.hdr.ctype = BTA_AV_RSP_NOT_IMPL;
+#if (TWS_ENABLED == TRUE)
+        p_data->rc_msg.msg.hdr.ctype = bta_av_is_twsplus_command(
+                                        p_data->rc_msg.msg.pass.p_pass_data);
+#endif
 #if (AVRC_METADATA_INCLUDED == TRUE)
-        if (p_cb->features & BTA_AV_FEAT_METADATA)
+        if (p_cb->features & BTA_AV_FEAT_METADATA
+#if (TWS_ENABLED == TRUE)
+          &&
+          p_data->rc_msg.msg.hdr.ctype == BTA_AV_RSP_NOT_IMPL
+#endif
+          )
           p_data->rc_msg.msg.hdr.ctype = bta_av_group_navi_supported(
               p_data->rc_msg.msg.pass.pass_len,
               p_data->rc_msg.msg.pass.p_pass_data, is_inquiry);
@@ -1149,7 +1243,8 @@ void bta_av_stream_chg(tBTA_AV_SCB* p_scb, bool started) {
   uint8_t* p_streams;
   bool no_streams = false;
   tBTA_AV_SCB* p_scbi;
-
+  char splitEnabled[PROPERTY_VALUE_MAX] = {0};
+  osi_property_get("persist.vendor.enable.splita2dp", splitEnabled, "true");
   started_msk = BTA_AV_HNDL_TO_MSK(p_scb->hdi);
   APPL_TRACE_DEBUG("bta_av_stream_chg started:%d started_msk:x%x chnl:x%x",
                    started, started_msk, p_scb->chnl);
@@ -1160,7 +1255,9 @@ void bta_av_stream_chg(tBTA_AV_SCB* p_scb, bool started) {
 
   if (started) {
     /* Let L2CAP know this channel is processed with high priority */
-    L2CA_SetAclPriority(p_scb->peer_addr, L2CAP_PRIORITY_HIGH);
+    if (!strcmp(splitEnabled, "false")) {
+      L2CA_SetAclPriority(p_scb->peer_addr, L2CAP_PRIORITY_HIGH);
+    }
     (*p_streams) |= started_msk;
   } else {
     (*p_streams) &= ~started_msk;
@@ -1190,7 +1287,8 @@ void bta_av_stream_chg(tBTA_AV_SCB* p_scb, bool started) {
                      bta_av_cb.video_streams);
     if (no_streams) {
       /* Let L2CAP know this channel is processed with low priority */
-      L2CA_SetAclPriority(p_scb->peer_addr, L2CAP_PRIORITY_NORMAL);
+      if (!strcmp(splitEnabled, "false"))
+        L2CA_SetAclPriority(p_scb->peer_addr, L2CAP_PRIORITY_NORMAL);
     }
   }
 }
@@ -1423,6 +1521,8 @@ void bta_av_disable(tBTA_AV_CB* p_cb, UNUSED_ATTR tBTA_AV_DATA* p_data) {
     p_cb->accept_signalling_timer[xx] = NULL;
   }
 
+  alarm_free(p_cb->browsing_channel_open_timer);
+  p_cb->browsing_channel_open_timer = NULL;
   alarm_free(p_cb->link_signalling_timer);
   p_cb->link_signalling_timer = NULL;
 }
@@ -1439,12 +1539,13 @@ void bta_av_disable(tBTA_AV_CB* p_cb, UNUSED_ATTR tBTA_AV_DATA* p_data) {
 void bta_av_api_disconnect(tBTA_AV_DATA* p_data) {
   AVDT_DisconnectReq(p_data->api_discnt.bd_addr, bta_av_conn_cback);
   alarm_cancel(bta_av_cb.link_signalling_timer);
+  alarm_cancel(bta_av_cb.browsing_channel_open_timer);
 }
 
 static uint16_t bta_sink_time_out() {
   char value[PROPERTY_VALUE_MAX] = {0};
   uint16_t pts_bta_accept_timeout = 5000;
-  osi_property_get("bt.pts.certification", value, "false");
+  osi_property_get("vendor.bt.pts.certification", value, "false");
   if(!strcmp(value, "true")){
       return pts_bta_accept_timeout; // increase timeout value to pass PTS;
   }
@@ -1902,66 +2003,80 @@ tBTA_AV_FEAT bta_av_check_peer_features(uint16_t service_uuid) {
  * Returns          tBTA_AV_FEAT peer device feature mask
  *
  ******************************************************************************/
-tBTA_AV_FEAT bta_avk_check_peer_features(uint16_t service_uuid) {
+tBTA_AV_FEAT bta_avk_check_peer_features(uint16_t service_uuid, uint16_t *p_psm) {
   tBTA_AV_FEAT peer_features = 0;
   tBTA_AV_CB* p_cb = &bta_av_cb;
+  tSDP_DISC_REC *p_rec = NULL;
+  tSDP_DISC_ATTR *p_attr;
+  uint16_t peer_rc_version = 0;
+  uint16_t categories = 0;
+  bool val;
+
 
   APPL_TRACE_DEBUG("%s service_uuid:x%x", __func__, service_uuid);
+  /* get next record; if none found, we're done */
+  p_rec = SDP_FindServiceInDb(p_cb->p_disc_db, service_uuid, p_rec);
+  if (p_rec != NULL) {
+      APPL_TRACE_DEBUG("%s found Service record for x%x", __func__, service_uuid);
+      if (service_uuid == UUID_SERVCLASS_AV_REMOTE_CONTROL)
+          peer_features |= BTA_AV_FEAT_RCCT;
+      else if (service_uuid == UUID_SERVCLASS_AV_REM_CTRL_TARGET)
+          peer_features |= BTA_AV_FEAT_RCTG;
+      if ((SDP_FindAttributeInRec(p_rec, ATTR_ID_BT_PROFILE_DESC_LIST)) != NULL)
+      {
+          /* profile version (if failure, version parameter is not updated) */
+          val = SDP_FindProfileVersionInRec(p_rec,
+          UUID_SERVCLASS_AV_REMOTE_CONTROL, &peer_rc_version);
+          APPL_TRACE_DEBUG("%s rc_version for TG 0x%x, profile_found %d", __FUNCTION__,
+                                               peer_rc_version, val);
 
-  /* loop through all records we found */
-  tSDP_DISC_REC* p_rec =
-      SDP_FindServiceInDb(p_cb->p_disc_db, service_uuid, NULL);
-  while (p_rec) {
-    APPL_TRACE_DEBUG("%s found Service record for x%x", __func__, service_uuid);
+          if (peer_rc_version < AVRC_REV_1_3)
+              return peer_features;
 
-    if ((SDP_FindAttributeInRec(p_rec, ATTR_ID_SERVICE_CLASS_ID_LIST)) !=
-        NULL) {
-      /* find peer features */
-      if (SDP_FindServiceInDb(p_cb->p_disc_db, UUID_SERVCLASS_AV_REMOTE_CONTROL,
-                              NULL)) {
-        peer_features |= BTA_AV_FEAT_RCCT;
-      }
-      if (SDP_FindServiceInDb(p_cb->p_disc_db,
-                              UUID_SERVCLASS_AV_REM_CTRL_TARGET, NULL)) {
-        peer_features |= BTA_AV_FEAT_RCTG;
-      }
+          p_attr = SDP_FindAttributeInRec(p_rec, ATTR_ID_SUPPORTED_FEATURES);
+          if (p_attr == NULL)
+              return peer_features;
+
+          categories = p_attr->attr_value.v.u16;
+
+          if (service_uuid == UUID_SERVCLASS_AV_REM_CTRL_TARGET)
+          {
+              peer_features |= (BTA_AV_FEAT_VENDOR | BTA_AV_FEAT_METADATA);
+              /* get supported categories */
+              if (categories & AVRC_SUPF_CT_BROWSE)
+                  peer_features |= BTA_AV_FEAT_BROWSE;
+              if (categories & AVRC_SUPF_CT_APP_SETTINGS)
+                  peer_features |= BTA_AV_FEAT_APP_SETTING;
+              if ((peer_rc_version >= AVRC_REV_1_6) &&
+                    (categories & AVRC_SUPF_TG_PLAYER_COVER_ART))
+              {
+                  peer_features |= BTA_AV_FEAT_CA;
+                  if ((p_attr = SDP_FindAttributeInRec(p_rec,
+                          ATTR_ID_ADDITION_PROTO_DESC_LISTS)) != NULL)
+                  {
+                      if (SDP_FindAvrcpCoverArtPSM(p_attr, p_psm) != TRUE)
+                          *p_psm = 0;
+
+                      APPL_TRACE_DEBUG(" %s PSM for cover art obex l2cap channel 0x%04X",
+                            __FUNCTION__, *p_psm);
+                  }
+              }
+          }
+          /*
+           * Absolute Volume came after in 1.4 and above.
+           * but there are few devices in market which supports.
+           * absoluteVolume and they are still 1.3 To avoid inter-operatibility issuses with.
+           * those devices, we check for 1.3 as minimum version.
+           */
+          else if (service_uuid == UUID_SERVCLASS_AV_REMOTE_CONTROL)
+          {
+              if (categories & AVRC_SUPF_CT_CAT2)
+              {
+                  APPL_TRACE_DEBUG(" %s Remote supports ABS Vol", __FUNCTION__);
+                  peer_features |= BTA_AV_FEAT_ADV_CTRL;
+              }
+          }
     }
-
-    if ((SDP_FindAttributeInRec(p_rec, ATTR_ID_BT_PROFILE_DESC_LIST)) != NULL) {
-      /* get profile version (if failure, version parameter is not updated) */
-      uint16_t peer_rc_version = 0;
-      bool val = SDP_FindProfileVersionInRec(
-          p_rec, UUID_SERVCLASS_AV_REMOTE_CONTROL, &peer_rc_version);
-      APPL_TRACE_DEBUG("%s peer_rc_version for TG 0x%x, profile_found %d",
-                       __func__, peer_rc_version, val);
-
-      if (peer_rc_version >= AVRC_REV_1_3)
-        peer_features |= (BTA_AV_FEAT_VENDOR | BTA_AV_FEAT_METADATA);
-
-      /*
-       * Though Absolute Volume came after in 1.4 and above, but there are few
-       * devices
-       * in market which supports absolute Volume and they are still 1.3
-       * TO avoid IOT issuses with those devices, we check for 1.3 as minimum
-       * version
-       */
-      if (peer_rc_version >= AVRC_REV_1_3) {
-        /* get supported features */
-        tSDP_DISC_ATTR* p_attr =
-            SDP_FindAttributeInRec(p_rec, ATTR_ID_SUPPORTED_FEATURES);
-        if (p_attr != NULL) {
-          uint16_t categories = p_attr->attr_value.v.u16;
-          if (categories & AVRC_SUPF_CT_CAT2)
-            peer_features |= (BTA_AV_FEAT_ADV_CTRL);
-          if (categories & AVRC_SUPF_CT_APP_SETTINGS)
-            peer_features |= (BTA_AV_FEAT_APP_SETTING);
-          if (categories & AVRC_SUPF_CT_BROWSE)
-            peer_features |= (BTA_AV_FEAT_BROWSE);
-        }
-      }
-    }
-    /* get next record; if none found, we're done */
-    p_rec = SDP_FindServiceInDb(p_cb->p_disc_db, service_uuid, p_rec);
   }
   APPL_TRACE_DEBUG("%s peer_features:x%x", __func__, peer_features);
   return peer_features;
@@ -1983,6 +2098,7 @@ void bta_av_rc_disc_done(UNUSED_ATTR tBTA_AV_DATA* p_data) {
   tBTA_AV_RC_OPEN rc_open;
   tBTA_AV_LCB* p_lcb;
   uint8_t rc_handle;
+  uint16_t cover_art_psm = 0;
   tBTA_AV_FEAT peer_features = 0; /* peer features mask */
 
   APPL_TRACE_DEBUG("%s bta_av_rc_disc_done disc:x%x", __func__, p_cb->disc);
@@ -2019,13 +2135,11 @@ void bta_av_rc_disc_done(UNUSED_ATTR tBTA_AV_DATA* p_data) {
 #if (BTA_AV_SINK_INCLUDED == TRUE)
   if (p_cb->sdp_a2dp_snk_handle) {
     /* This is Sink + CT + TG(Abs Vol) */
-    peer_features =
-        bta_avk_check_peer_features(UUID_SERVCLASS_AV_REM_CTRL_TARGET);
-    APPL_TRACE_DEBUG("%s populating rem ctrl target features %d", __func__,
-                     peer_features);
-    if (BTA_AV_FEAT_ADV_CTRL &
-        bta_avk_check_peer_features(UUID_SERVCLASS_AV_REMOTE_CONTROL))
-      peer_features |= (BTA_AV_FEAT_ADV_CTRL | BTA_AV_FEAT_RCCT);
+      peer_features = bta_avk_check_peer_features(UUID_SERVCLASS_AV_REMOTE_CONTROL,
+                                                  &cover_art_psm);
+      peer_features |= bta_avk_check_peer_features(UUID_SERVCLASS_AV_REM_CTRL_TARGET,
+                                                  &cover_art_psm);
+      APPL_TRACE_DEBUG("final rc_features %x", peer_features);
   } else
 #endif
       if (p_cb->sdp_a2dp_handle) {
@@ -2062,6 +2176,7 @@ void bta_av_rc_disc_done(UNUSED_ATTR tBTA_AV_DATA* p_data) {
                                        (uint8_t)(p_scb->hdi + 1), p_lcb->lidx);
           if ((rc_handle != BTA_AV_RC_HANDLE_NONE) && (rc_handle < BTA_AV_NUM_RCB)) {
             p_cb->rcb[rc_handle].peer_features = peer_features;
+            p_cb->rcb[rc_handle].cover_art_psm = cover_art_psm;
           } else {
             /* cannot create valid rc_handle for current device */
             APPL_TRACE_ERROR(" No link resources available");
@@ -2088,6 +2203,7 @@ void bta_av_rc_disc_done(UNUSED_ATTR tBTA_AV_DATA* p_data) {
   } else {
     tBTA_AV_RC_FEAT rc_feat;
     p_cb->rcb[rc_handle].peer_features = peer_features;
+    rc_feat.cover_art_psm = cover_art_psm;
     rc_feat.rc_handle = rc_handle;
     rc_feat.peer_features = peer_features;
     if (p_scb == NULL) {
@@ -2274,6 +2390,8 @@ void bta_av_rc_disc(uint8_t disc) {
   tBTA_AV_CB* p_cb = &bta_av_cb;
   tAVRC_SDP_DB_PARAMS db_params;
   uint16_t attr_list[] = {ATTR_ID_SERVICE_CLASS_ID_LIST,
+                          ATTR_ID_PROTOCOL_DESC_LIST,
+                          ATTR_ID_ADDITION_PROTO_DESC_LISTS,
                           ATTR_ID_BT_PROFILE_DESC_LIST,
                           ATTR_ID_SUPPORTED_FEATURES};
   uint8_t hdi;
@@ -2307,7 +2425,7 @@ void bta_av_rc_disc(uint8_t disc) {
 
     /* set up parameters */
     db_params.db_len = BTA_AV_DISC_BUF_SIZE;
-    db_params.num_attr = 3;
+    db_params.num_attr = sizeof(attr_list) / sizeof(uint16_t);
     db_params.p_db = p_cb->p_disc_db;
     db_params.p_attrs = attr_list;
 
@@ -2414,4 +2532,17 @@ void bta_av_dereg_comp(tBTA_AV_DATA* p_data) {
     cod.service = BTM_COD_SERVICE_CAPTURING;
     utl_set_device_class(&cod, BTA_UTL_CLR_COD_SERVICE_CLASS);
   }
+}
+
+/*******************************************************************************
+ *
+ * Function         bta_av_browsing_channel_open_retry
+ *
+ * Description      Retry to AVRCP command to open browsing channel.
+ *
+ * Returns          void
+ *
+ ******************************************************************************/
+static void bta_av_browsing_channel_open_retry(uint8_t handle) {
+  AVRC_OpenBrowse(handle, AVCT_INT);
 }

@@ -1,3 +1,38 @@
+/*
+ * Copyright (C) 2017 The Linux Foundation. All rights reserved
+ * Not a Contribution.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted (subject to the limitations in the
+ * disclaimer below) provided that the following conditions are met:
+ *
+ * * Redistributions of source code must retain the above copyright
+ *     notice, this list of conditions and the following disclaimer.
+ *
+ * * Redistributions in binary form must reproduce the above
+ *     copyright notice, this list of conditions and the following
+ *     disclaimer in the documentation and/or other materials provided
+ *     with the distribution.
+ *
+ * * Neither the name of The Linux Foundation nor the names of its
+ *     contributors may be used to endorse or promote products derived
+ *     from this software without specific prior written permission.
+ *
+ * NO EXPRESS OR IMPLIED LICENSES TO ANY PARTY'S PATENT RIGHTS ARE
+ * GRANTED BY THIS LICENSE. THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT
+ * HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED
+ * WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF
+ * MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
+ * IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR
+ * ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE
+ * GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER
+ * IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
+ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN
+ * IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ */
+
 /******************************************************************************
  *
  *  Copyright (C) 1999-2012 Broadcom Corporation
@@ -348,6 +383,19 @@ bool SDP_FindProtocolListElemInRec(tSDP_DISC_REC* p_rec, uint16_t layer_uuid,
 
 /*******************************************************************************
  *
+ * Function         SDP_FindAvrcpCoverArtPSM
+ *
+ * Description      This function pulls the cover art protocol service mask from the additional
+ *                  protocol descriptor list attribute
+ *
+ * Returns          TRUE if found, FALSE if not
+ *                  If found, the psm will be filled in p_psm.
+ *
+*******************************************************************************/
+bool SDP_FindAvrcpCoverArtPSM (tSDP_DISC_ATTR *p_attr, uint16_t *p_psm);
+
+/*******************************************************************************
+ *
  * Function         SDP_FindAddProtoListsElemInRec
  *
  * Description      This function looks at a specific discovery record for a
@@ -648,5 +696,10 @@ bool SDP_FindServiceUUIDInRec(tSDP_DISC_REC* p_rec, bluetooth::Uuid* p_uuid);
 **
 ********************************************************************************/
 bool SDP_Dev_Blacklisted_For_Avrcp15 (RawAddress addr);
+
+bool SDP_AddProfileDescriptorListUuid128(uint32_t handle, uint8_t *profile_uuid,
+                                  uint16_t version);
+
+bool SDP_AddServiceClassIdListUuid128(uint32_t handle, uint8_t* p_service_uuids);
 
 #endif /* SDP_API_H */

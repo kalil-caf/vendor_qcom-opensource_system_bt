@@ -23,6 +23,9 @@
  *
  ******************************************************************************/
 
+
+#include <cutils/log.h>
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -75,7 +78,7 @@
 /******************************************************************************/
 static void process_service_search(tCONN_CB* p_ccb, uint16_t trans_num,
                                    uint16_t param_len, uint8_t* p_req,
-                                   UNUSED_ATTR uint8_t* p_req_end);
+                                   uint8_t* p_req_end);
 
 static void process_service_attr_req(tCONN_CB* p_ccb, uint16_t trans_num,
                                      uint16_t param_len, uint8_t* p_req,
@@ -83,7 +86,7 @@ static void process_service_attr_req(tCONN_CB* p_ccb, uint16_t trans_num,
 
 static void process_service_search_attr_req(tCONN_CB* p_ccb, uint16_t trans_num,
                                             uint16_t param_len, uint8_t* p_req,
-                                            UNUSED_ATTR uint8_t* p_req_end);
+                                            uint8_t* p_req_end);
 
 static bool is_device_blacklisted_for_pbap (RawAddress remote_address,
                                             bool check_for_1_2);
@@ -276,7 +279,7 @@ bool sdp_fallback_avrcp_version (tSDP_ATTRIBUTE *p_attr, RawAddress remote_addre
                          p_attr->value_ptr[PROFILE_VERSION_POSITION]);
                 return TRUE;
             }
-            property_get("persist.service.bt.a2dp.sink", a2dp_role, "false");
+            property_get("persist.vendor.service.bt.a2dp.sink", a2dp_role, "false");
             if (!strncmp("false", a2dp_role, 5)) {
                 ver = sdp_get_stored_avrc_tg_version (remote_address);
                 if (ver != AVRC_REV_INVALID)
@@ -413,7 +416,7 @@ bool sdp_change_hfp_version (tSDP_ATTRIBUTE *p_attr, RawAddress remote_address)
                            __func__, remote_address.ToString().c_str());
             /* For PTS we should show AG's HFP version as 1.7 */
             if (is_blacklisted ||
-                (property_get("bt.pts.certification", value, "false") &&
+                (property_get("vendor.bt.pts.certification", value, "false") &&
                 strcmp(value, "true") == 0))
             {
                 p_attr->value_ptr[PROFILE_VERSION_POSITION] = 0x07; // Update HFP version as 1.7
@@ -447,11 +450,25 @@ void sdp_server_handle_client_req(tCONN_CB* p_ccb, BT_HDR* p_msg) {
   alarm_set_on_mloop(p_ccb->sdp_conn_timer, SDP_INACT_TIMEOUT_MS,
                      sdp_conn_timer_timeout, p_ccb);
 
+  if (p_req + sizeof(pdu_id) + sizeof(trans_num) > p_req_end) {
+    android_errorWriteLog(0x534e4554, "69384124");
+    trans_num = 0;
+    sdpu_build_n_send_error(p_ccb, trans_num, SDP_INVALID_REQ_SYNTAX,
+                            SDP_TEXT_BAD_HEADER);
+  }
+
   /* The first byte in the message is the pdu type */
   pdu_id = *p_req++;
 
   /* Extract the transaction number and parameter length */
   BE_STREAM_TO_UINT16(trans_num, p_req);
+
+  if (p_req + sizeof(param_len) > p_req_end) {
+    android_errorWriteLog(0x534e4554, "69384124");
+    sdpu_build_n_send_error(p_ccb, trans_num, SDP_INVALID_REQ_SYNTAX,
+                            SDP_TEXT_BAD_HEADER);
+  }
+
   BE_STREAM_TO_UINT16(param_len, p_req);
 
   if ((p_req + param_len) != p_req_end) {
@@ -495,7 +512,7 @@ void sdp_server_handle_client_req(tCONN_CB* p_ccb, BT_HDR* p_msg) {
  ******************************************************************************/
 static void process_service_search(tCONN_CB* p_ccb, uint16_t trans_num,
                                    uint16_t param_len, uint8_t* p_req,
-                                   UNUSED_ATTR uint8_t* p_req_end) {
+                                   uint8_t* p_req_end) {
   uint16_t max_replies, cur_handles, rem_handles, cont_offset;
   tSDP_UUID_SEQ uid_seq;
   uint8_t *p_rsp, *p_rsp_start, *p_rsp_param_len;
@@ -513,23 +530,21 @@ static void process_service_search(tCONN_CB* p_ccb, uint16_t trans_num,
   }
 
   /* Get the max replies we can send. Cap it at our max anyways. */
-  BE_STREAM_TO_UINT16(max_replies, p_req);
-
-    if (!max_replies)
-    {
-        sdpu_build_n_send_error (p_ccb, trans_num, SDP_INVALID_REQ_SYNTAX,
-                                 SDP_TEXT_BAD_MAX_ATTR_LIST);
-        return;
-    }
-
-    if (max_replies > SDP_MAX_RECORDS)
-        max_replies = SDP_MAX_RECORDS;
-
-  if ((!p_req) || (p_req > p_req_end)) {
+  if (p_req + sizeof(max_replies) + sizeof(uint8_t) > p_req_end) {
+    android_errorWriteLog(0x534e4554, "69384124");
     sdpu_build_n_send_error(p_ccb, trans_num, SDP_INVALID_REQ_SYNTAX,
                             SDP_TEXT_BAD_MAX_RECORDS_LIST);
     return;
   }
+  BE_STREAM_TO_UINT16(max_replies, p_req);
+    
+  if (!max_replies) {
+    sdpu_build_n_send_error (p_ccb, trans_num, SDP_INVALID_REQ_SYNTAX,
+                             SDP_TEXT_BAD_MAX_ATTR_LIST);
+    return;
+  }
+
+  if (max_replies > SDP_MAX_RECORDS) max_replies = SDP_MAX_RECORDS;
 
   /* Get a list of handles that match the UUIDs given to us */
   for (num_rsp_handles = 0; num_rsp_handles < max_replies;) {
@@ -543,7 +558,8 @@ static void process_service_search(tCONN_CB* p_ccb, uint16_t trans_num,
 
   /* Check if this is a continuation request */
   if (*p_req) {
-    if (*p_req++ != SDP_CONTINUATION_LEN || (p_req >= p_req_end)) {
+    if (*p_req++ != SDP_CONTINUATION_LEN ||
+        (p_req + sizeof(cont_offset) > p_req_end)) {
       sdpu_build_n_send_error(p_ccb, trans_num, SDP_INVALID_CONT_STATE,
                               SDP_TEXT_BAD_CONT_LEN);
       return;
@@ -652,15 +668,18 @@ static void process_service_attr_req(tCONN_CB* p_ccb, uint16_t trans_num,
   uint16_t attr_len;
   bool is_avrcp_fallback = FALSE;
   bool is_avrcp_browse_bit_reset = FALSE;
+  bool is_avrcp_cover_bit_reset = FALSE;
   uint16_t dut_profile_version;
-  /* Extract the record handle */
-  BE_STREAM_TO_UINT32(rec_handle, p_req);
 
-  if (p_req > p_req_end) {
+  if (p_req + sizeof(rec_handle) + sizeof(max_list_len) > p_req_end) {
+    android_errorWriteLog(0x534e4554, "69384124");
     sdpu_build_n_send_error(p_ccb, trans_num, SDP_INVALID_SERV_REC_HDL,
                             SDP_TEXT_BAD_HANDLE);
     return;
   }
+
+  /* Extract the record handle */
+  BE_STREAM_TO_UINT32(rec_handle, p_req);
 
   /* Get the max list length we can send. Cap it at MTU size minus overhead */
   BE_STREAM_TO_UINT16(max_list_len, p_req);
@@ -677,7 +696,8 @@ static void process_service_attr_req(tCONN_CB* p_ccb, uint16_t trans_num,
 
   p_req = sdpu_extract_attr_seq(p_req, param_len, &attr_seq);
 
-  if ((!p_req) || (!attr_seq.num_attr) || (p_req > p_req_end)) {
+  if ((!p_req) || (!attr_seq.num_attr) ||
+      (p_req + sizeof(uint8_t) > p_req_end)) {
     sdpu_build_n_send_error(p_ccb, trans_num, SDP_INVALID_REQ_SYNTAX,
                             SDP_TEXT_BAD_ATTR_LIST);
     return;
@@ -700,7 +720,8 @@ static void process_service_attr_req(tCONN_CB* p_ccb, uint16_t trans_num,
 
   /* Check if this is a continuation request */
   if (*p_req) {
-    if (*p_req++ != SDP_CONTINUATION_LEN) {
+    if (*p_req++ != SDP_CONTINUATION_LEN ||
+        (p_req + sizeof(cont_offset) > p_req_end)) {
       sdpu_build_n_send_error(p_ccb, trans_num, SDP_INVALID_CONT_STATE,
                               SDP_TEXT_BAD_CONT_LEN);
       return;
@@ -757,6 +778,8 @@ static void process_service_attr_req(tCONN_CB* p_ccb, uint16_t trans_num,
         is_avrcp_fallback = sdp_fallback_avrcp_version (p_attr, p_ccb->device_address);
         // check for browse bit will happen always, because minimum DUT version is 1.4 now.
         is_avrcp_browse_bit_reset = sdp_reset_avrcp_browsing_bit(
+                p_rec->attribute[1], p_attr, p_ccb->device_address);
+        is_avrcp_cover_bit_reset = sdp_reset_avrcp_cover_art_bit(
                 p_rec->attribute[1], p_attr, p_ccb->device_address);
     }
 
@@ -840,6 +863,21 @@ static void process_service_attr_req(tCONN_CB* p_ccb, uint16_t trans_num,
           }
           is_avrcp_browse_bit_reset = FALSE;
       }
+      if (is_avrcp_cover_bit_reset) {
+          /* Restore Cover Art bit */
+          SDP_TRACE_ERROR("Restore Cover Art bit");
+          switch(dut_profile_version) {
+              case AVRC_REV_1_6:
+               SDP_TRACE_ERROR(" %s, DUT version 1.6, cover_art_bit should not be true", __func__);
+              break;
+              case AVRC_REV_1_5:
+              case AVRC_REV_1_4:
+                  p_attr->value_ptr[AVRCP_SUPPORTED_FEATURES_POSITION-1]
+                                              |= AVRCP_CA_SUPPORT_BITMASK;
+              break;
+          }
+          is_avrcp_cover_bit_reset = FALSE;
+      }
       if (is_hfp_fallback) {
           SDP_TRACE_ERROR("Restore HFP version to 1.6");
           /* Update HFP version back to 1.6 */
@@ -878,6 +916,21 @@ static void process_service_attr_req(tCONN_CB* p_ccb, uint16_t trans_num,
           break;
       }
       is_avrcp_browse_bit_reset = FALSE;
+  }
+  if (is_avrcp_cover_bit_reset) {
+      /* Restore Cover Art bit */
+      SDP_TRACE_ERROR("Restore Cover Art bit");
+      switch(dut_profile_version) {
+          case AVRC_REV_1_6:
+           SDP_TRACE_ERROR(" %s, DUT version 1.6, cover_art_bit should not be true", __func__);
+          break;
+          case AVRC_REV_1_5:
+          case AVRC_REV_1_4:
+              p_attr->value_ptr[AVRCP_SUPPORTED_FEATURES_POSITION-1]
+                                          |= AVRCP_CA_SUPPORT_BITMASK;
+          break;
+      }
+      is_avrcp_cover_bit_reset = FALSE;
   }
   if (is_hfp_fallback) {
       SDP_TRACE_ERROR("Restore HFP version to 1.6");
@@ -967,7 +1020,7 @@ static void process_service_attr_req(tCONN_CB* p_ccb, uint16_t trans_num,
  ******************************************************************************/
 static void process_service_search_attr_req(tCONN_CB* p_ccb, uint16_t trans_num,
                                             uint16_t param_len, uint8_t* p_req,
-                                            UNUSED_ATTR uint8_t* p_req_end) {
+                                            uint8_t* p_req_end) {
   uint16_t max_list_len;
   int16_t rem_len;
   uint16_t len_to_send, cont_offset;
@@ -984,12 +1037,14 @@ static void process_service_search_attr_req(tCONN_CB* p_ccb, uint16_t trans_num,
   uint16_t seq_len, attr_len;
   bool is_avrcp_fallback = FALSE;
   bool is_avrcp_browse_bit_reset = FALSE;
+  bool is_avrcp_cover_bit_reset = FALSE;
   uint16_t dut_profile_version;
 
   /* Extract the UUID sequence to search for */
   p_req = sdpu_extract_uid_seq(p_req, param_len, &uid_seq);
 
-  if ((!p_req) || (!uid_seq.num_uids)) {
+  if ((!p_req) || (!uid_seq.num_uids) ||
+      (p_req + sizeof(uint16_t) > p_req_end)) {
     sdpu_build_n_send_error(p_ccb, trans_num, SDP_INVALID_REQ_SYNTAX,
                             SDP_TEXT_BAD_UUID_LIST);
     return;
@@ -1010,7 +1065,8 @@ static void process_service_search_attr_req(tCONN_CB* p_ccb, uint16_t trans_num,
 
   p_req = sdpu_extract_attr_seq(p_req, param_len, &attr_seq);
 
-  if ((!p_req) || (!attr_seq.num_attr)) {
+  if ((!p_req) || (!attr_seq.num_attr) ||
+      (p_req + sizeof(uint8_t) > p_req_end)) {
     sdpu_build_n_send_error(p_ccb, trans_num, SDP_INVALID_REQ_SYNTAX,
                             SDP_TEXT_BAD_ATTR_LIST);
     return;
@@ -1024,7 +1080,8 @@ static void process_service_search_attr_req(tCONN_CB* p_ccb, uint16_t trans_num,
 
   /* Check if this is a continuation request */
   if (*p_req) {
-    if (*p_req++ != SDP_CONTINUATION_LEN) {
+    if (*p_req++ != SDP_CONTINUATION_LEN ||
+        (p_req + sizeof(uint16_t) > p_req_end)) {
       sdpu_build_n_send_error(p_ccb, trans_num, SDP_INVALID_CONT_STATE,
                               SDP_TEXT_BAD_CONT_LEN);
       return;
@@ -1104,6 +1161,8 @@ static void process_service_search_attr_req(tCONN_CB* p_ccb, uint16_t trans_num,
             is_avrcp_fallback = sdp_fallback_avrcp_version (p_attr, p_ccb->device_address);
             // check for browse bit will happen always, because minimum DUT version is 1.4 now.
             is_avrcp_browse_bit_reset = sdp_reset_avrcp_browsing_bit(
+                    p_rec->attribute[1], p_attr, p_ccb->device_address);
+            is_avrcp_cover_bit_reset = sdp_reset_avrcp_cover_art_bit(
                     p_rec->attribute[1], p_attr, p_ccb->device_address);
         }
 
@@ -1191,6 +1250,21 @@ static void process_service_search_attr_req(tCONN_CB* p_ccb, uint16_t trans_num,
             }
             is_avrcp_browse_bit_reset = FALSE;
         }
+        if (is_avrcp_cover_bit_reset) {
+            /* Restore Cover Art bit */
+            SDP_TRACE_ERROR("Restore Cover Art bit");
+            switch(dut_profile_version) {
+                case AVRC_REV_1_6:
+                 SDP_TRACE_ERROR(" %s, DUT version 1.6, cover_art_bit should not be true", __func__);
+                break;
+                case AVRC_REV_1_5:
+                case AVRC_REV_1_4:
+                    p_attr->value_ptr[AVRCP_SUPPORTED_FEATURES_POSITION-1]
+                                                |= AVRCP_CA_SUPPORT_BITMASK;
+                break;
+            }
+            is_avrcp_cover_bit_reset = FALSE;
+        }
         if (is_hfp_fallback) {
             SDP_TRACE_ERROR("Restore HFP version to 1.6");
             /* Update HFP version back to 1.6 */
@@ -1229,6 +1303,21 @@ static void process_service_search_attr_req(tCONN_CB* p_ccb, uint16_t trans_num,
             break;
         }
         is_avrcp_browse_bit_reset = FALSE;
+    }
+    if (is_avrcp_cover_bit_reset) {
+        /* Restore Cover Art bit */
+        SDP_TRACE_ERROR("Restore Cover Art bit");
+        switch(dut_profile_version) {
+            case AVRC_REV_1_6:
+             SDP_TRACE_ERROR(" %s, DUT version 1.6, cover_art_bit should not be true", __func__);
+            break;
+            case AVRC_REV_1_5:
+            case AVRC_REV_1_4:
+                p_attr->value_ptr[AVRCP_SUPPORTED_FEATURES_POSITION-1]
+                                            |= AVRCP_CA_SUPPORT_BITMASK;
+            break;
+        }
+        is_avrcp_cover_bit_reset = FALSE;
     }
     if (is_hfp_fallback) {
         SDP_TRACE_ERROR("Restore HFP version to 1.6");

@@ -540,20 +540,12 @@ static void l2c_csm_w4_l2cap_connect_rsp(tL2C_CCB* p_ccb, uint16_t event,
 
   switch (event) {
     case L2CEVT_LP_DISCONNECT_IND: /* Link was disconnected */
-      /* Send disc indication unless peer to peer race condition AND normal
-       * disconnect */
-      /* *((uint8_t *)p_data) != HCI_ERR_PEER_USER happens when peer device try
-       * to disconnect for normal reason */
       p_ccb->chnl_state = CST_CLOSED;
-      if ((p_ccb->flags & CCB_FLAG_NO_RETRY) || !p_data ||
-          (*((uint8_t*)p_data) != HCI_ERR_PEER_USER)) {
-        L2CAP_TRACE_API(
-            "L2CAP - Calling Disconnect_Ind_Cb(), CID: 0x%04x  No Conf Needed",
-            p_ccb->local_cid);
-        l2cu_release_ccb(p_ccb);
-        (*disconnect_ind)(local_cid, false);
-      }
-      p_ccb->flags |= CCB_FLAG_NO_RETRY;
+      L2CAP_TRACE_API(
+          "L2CAP - Calling Disconnect_Ind_Cb(), CID: 0x%04x  No Conf Needed",
+          p_ccb->local_cid);
+      l2cu_release_ccb(p_ccb);
+      (*disconnect_ind)(local_cid, false);
       break;
 
     case L2CEVT_L2CAP_CONNECT_RSP: /* Got peer connect confirm */
@@ -1161,13 +1153,19 @@ static void l2c_csm_open(tL2C_CCB* p_ccb, uint16_t event, void* p_data) {
     case L2CEVT_L2CAP_RECV_FLOW_CONTROL_CREDIT:
       credit = (uint16_t*)p_data;
       L2CAP_TRACE_DEBUG("%s Credits received %d", __func__, *credit);
-      if ((p_ccb->peer_conn_cfg.credits + *credit) > L2CAP_LE_MAX_CREDIT) {
+      if ((p_ccb->peer_conn_cfg.credits + *credit) > L2CAP_LE_CREDIT_MAX) {
         /* we have received credits more than max coc credits,
          * so disconnecting the Le Coc Channel
          */
         l2cble_send_peer_disc_req(p_ccb);
       } else {
         p_ccb->peer_conn_cfg.credits += *credit;
+
+        tL2CA_CREDITS_RECEIVED_CB* cr_cb =
+            p_ccb->p_rcb->api.pL2CA_CreditsReceived_Cb;
+        if (p_ccb->p_lcb->transport == BT_TRANSPORT_LE && (cr_cb)) {
+          (*cr_cb)(p_ccb->local_cid, *credit, p_ccb->peer_conn_cfg.credits);
+        }
         l2c_link_check_send_pkts(p_ccb->p_lcb, NULL, NULL);
       }
       break;

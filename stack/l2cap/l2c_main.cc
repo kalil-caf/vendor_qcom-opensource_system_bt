@@ -67,7 +67,6 @@ void l2c_rcv_acl_data(BT_HDR* p_msg) {
   tL2C_LCB* p_lcb;
   tL2C_CCB* p_ccb = NULL;
   uint16_t l2cap_len, rcv_cid, psm;
-  uint16_t credit;
   uint16_t soc_log_stats_id;
 
   /* Extract the handle */
@@ -225,9 +224,19 @@ void l2c_rcv_acl_data(BT_HDR* p_msg) {
     else {
       if (p_lcb->transport == BT_TRANSPORT_LE) {
         l2c_lcc_proc_pdu(p_ccb, p_msg);
+
+        /* The remote device has one less credit left */
+        --p_ccb->remote_credit_count;
         // Got a pkt, valid send out credits to the peer device
-        credit = L2CAP_LE_DEFAULT_CREDIT;
-        l2c_csm_execute(p_ccb, L2CEVT_L2CA_SEND_FLOW_CONTROL_CREDIT, &credit);
+
+        /* If the credits left on the remote device are getting low, send some */
+        if (p_ccb->remote_credit_count <= L2CAP_LE_CREDIT_THRESHOLD) {
+          uint16_t credits = L2CAP_LE_CREDIT_DEFAULT - p_ccb->remote_credit_count;
+          p_ccb->remote_credit_count = L2CAP_LE_CREDIT_DEFAULT;
+
+          /* Return back credits */
+          l2c_csm_execute(p_ccb, L2CEVT_L2CA_SEND_FLOW_CONTROL_CREDIT, &credits);
+        }
       } else {
         /* Basic mode packets go straight to the state machine */
         if (p_ccb->peer_cfg.fcr.mode == L2CAP_FCR_BASIC_MODE)
@@ -660,7 +669,6 @@ static void process_l2cap_cmd(tL2C_LCB* p_lcb, uint8_t* p, uint16_t pkt_len) {
         /* Stop the link connect timer if sent before L2CAP connection is up */
         if (p_lcb->w4_info_rsp) {
           alarm_cancel(p_lcb->info_resp_timer);
-          p_lcb->w4_info_rsp = false;
         }
 
         STREAM_TO_UINT16(info_type, p);
@@ -699,11 +707,14 @@ static void process_l2cap_cmd(tL2C_LCB* p_lcb, uint8_t* p, uint16_t pkt_len) {
         }
 #endif
 
-        ci.status = HCI_SUCCESS;
-        ci.bd_addr = p_lcb->remote_bd_addr;
-        for (p_ccb = p_lcb->ccb_queue.p_first_ccb; p_ccb;
-             p_ccb = p_ccb->p_next_ccb) {
-          l2c_csm_execute(p_ccb, L2CEVT_L2CAP_INFO_RSP, &ci);
+        if (p_lcb->w4_info_rsp) {
+          p_lcb->w4_info_rsp = false;
+          ci.status = HCI_SUCCESS;
+          ci.bd_addr = p_lcb->remote_bd_addr;
+          for (p_ccb = p_lcb->ccb_queue.p_first_ccb; p_ccb;
+               p_ccb = p_ccb->p_next_ccb) {
+            l2c_csm_execute(p_ccb, L2CEVT_L2CAP_INFO_RSP, &ci);
+          }
         }
         break;
 
@@ -773,6 +784,16 @@ void l2c_init(void) {
   /* the psm is increased by 2 before being used */
   l2cb.dyn_psm = 0xFFF;
 
+  /* the LE PSM is increased by 1 before being used */
+  l2cb.le_dyn_psm = LE_DYNAMIC_PSM_START - 1;
+
+  /* start new timers for all lcbs */
+  tL2C_LCB* p_lcb = &l2cb.lcb_pool[0];
+  for (xx = 0; xx < MAX_L2CAP_LINKS; xx++, p_lcb++) {
+    p_lcb->l2c_lcb_timer = alarm_new("l2c_lcb.l2c_lcb_timer");
+    p_lcb->info_resp_timer = alarm_new("l2c_lcb.info_resp_timer");
+  }
+
   /* Put all the channel control blocks on the free queue */
   for (xx = 0; xx < MAX_L2CAP_CHANNELS - 1; xx++) {
     l2cb.ccb_pool[xx].p_next_ccb = &l2cb.ccb_pool[xx + 1];
@@ -822,6 +843,16 @@ void l2c_init(void) {
 }
 
 void l2c_free(void) {
+
+  int xx;
+  tL2C_LCB* p_lcb = &l2cb.lcb_pool[0];
+  for (xx = 0; xx < MAX_L2CAP_LINKS; xx++, p_lcb++) {
+    alarm_free(p_lcb->l2c_lcb_timer);
+    p_lcb->l2c_lcb_timer = NULL;
+    alarm_free(p_lcb->info_resp_timer);
+    p_lcb->info_resp_timer = NULL;
+  }
+
   list_free(l2cb.rcv_pending_q);
   l2cb.rcv_pending_q = NULL;
 }

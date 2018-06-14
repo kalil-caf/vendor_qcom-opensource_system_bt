@@ -42,7 +42,7 @@
 #include <hardware/bt_hl.h>
 #include <hardware/bt_mce.h>
 #include <hardware/bt_pan.h>
-#include <hardware/bt_rc.h>
+#include <hardware/bt_rc_ext.h>
 #include <hardware/bt_sdp.h>
 #include <hardware/bt_sock.h>
 #ifdef WIPOWER_SUPPORTED
@@ -50,7 +50,8 @@
 #endif
 #include <hardware/vendor.h>
 #include <hardware/vendor_socket.h>
-
+#include <hardware/bt_ba.h>
+#include <hardware/bt_vendor_rc.h>
 #include "bt_utils.h"
 #include "bta/include/bta_hf_client_api.h"
 #include "btif/include/btif_debug_btsnoop.h"
@@ -125,6 +126,9 @@ extern btmcap_test_interface_t* stack_mcap_get_interface();
 extern btvendor_interface_t *btif_vendor_get_interface();
 /* vendor socket*/
 extern btvendor_interface_t *btif_vendor_socket_get_interface();
+/* broadcast transmitter */
+extern ba_transmitter_interface_t *btif_bat_get_interface();
+extern btrc_vendor_ctrl_interface_t *btif_rc_vendor_ctrl_get_interface();
 
 /*******************************************************************************
  *  Functions
@@ -384,6 +388,9 @@ static const void* get_profile_interface(const char* profile_id) {
   if (is_profile(profile_id, BT_PROFILE_AV_RC_CTRL_ID))
     return btif_rc_ctrl_get_interface();
 
+  if (is_profile(profile_id, BT_PROFILE_AV_RC_VENDOR_CTRL_ID))
+    return btif_rc_vendor_ctrl_get_interface();
+
   if (is_profile(profile_id, BT_PROFILE_VENDOR_ID))
     return btif_vendor_get_interface();
 
@@ -397,6 +404,9 @@ static const void* get_profile_interface(const char* profile_id) {
 
   if (is_profile(profile_id, BT_TEST_INTERFACE_MCAP_ID))
     return stack_mcap_get_interface();
+
+  if (is_profile(profile_id, BT_PROFILE_BAT_ID))
+    return btif_bat_get_interface();
 
   return NULL;
 }
