@@ -216,7 +216,7 @@ void avdt_ccb_hdl_discover_cmd(tAVDT_CCB* p_ccb, tAVDT_CCB_EVT* p_data) {
          }
        } else {
            if (p_scb->cs.cfg.codec_info[AVDT_CODEC_TYPE_INDEX] == A2DP_MEDIA_CT_AAC &&
-               interop_match_addr(INTEROP_DISABLE_AAC_CODEC, &p_ccb->peer_addr)) {
+               interop_match_addr_or_name(INTEROP_DISABLE_AAC_CODEC, &p_ccb->peer_addr)) {
              AVDT_TRACE_EVENT("%s: skipping AAC advertise\n", __func__);
              continue;
            }

@@ -85,13 +85,6 @@ inline bool BTM_BLE_IS_RESOLVE_BDA(const RawAddress& x) {
   return ((x.address)[0] & BLE_RESOLVE_ADDR_MASK) == BLE_RESOLVE_ADDR_MSB;
 }
 
-#define BLE_PUBLIC_ADDR_MSB_MASK 0xC0
-/*  most significant bit, bit7, bit6 is 10 to be public address*/
-#define BLE_PUBLIC_ADDR_MSB 0x80
-inline bool BTM_IS_PUBLIC_BDA(const RawAddress& x) {
-  return ((x.address)[0] & BLE_PUBLIC_ADDR_MSB_MASK) == BLE_PUBLIC_ADDR_MSB;
-}
-
 /* LE scan activity bit mask, continue with LE inquiry bits */
 /* observe is in progress */
 #define BTM_LE_OBSERVE_ACTIVE 0x80
@@ -132,8 +125,9 @@ typedef struct {
 typedef struct {
   uint16_t discoverable_mode;
   uint16_t connectable_mode;
-  uint32_t scan_window;
-  uint32_t scan_interval;
+  std::vector<uint32_t> scan_window;
+  std::vector<uint32_t> scan_interval;
+  uint8_t scan_phy;
   uint8_t scan_type;             /* current scan type: active or passive */
   uint8_t scan_duplicate_filter; /* duplicate filter enabled for scan */
   uint16_t adv_interval_min;

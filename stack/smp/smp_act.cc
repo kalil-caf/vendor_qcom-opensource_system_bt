@@ -22,6 +22,7 @@
 #include "internal_include/bt_target.h"
 #include "stack/btm/btm_int.h"
 #include "stack/include/l2c_api.h"
+#include "stack/smp/p_256_ecc_pp.h"
 #include "stack/smp/smp_int.h"
 #include "utils/include/bt_utils.h"
 
@@ -167,7 +168,7 @@ void smp_send_app_cback(tSMP_CB* p_cb, tSMP_INT_DATA* p_data) {
 
           if (!(p_cb->loc_auth_req & SMP_SC_SUPPORT_BIT) ||
               lmp_version_below(p_cb->pairing_bda, HCI_PROTO_VERSION_4_2) ||
-              interop_match_addr(INTEROP_DISABLE_LE_SECURE_CONNECTIONS,
+              interop_match_addr_or_name(INTEROP_DISABLE_LE_SECURE_CONNECTIONS,
                                  (const RawAddress*)&p_cb->pairing_bda)) {
             p_cb->loc_auth_req &= ~SMP_KP_SUPPORT_BIT;
             p_cb->local_i_key &= ~SMP_SEC_KEY_TYPE_LK;
@@ -178,7 +179,7 @@ void smp_send_app_cback(tSMP_CB* p_cb, tSMP_INT_DATA* p_data) {
             p_cb->loc_auth_req &= ~SMP_H7_SUPPORT_BIT;
           }
 
-          if (interop_match_addr(INTEROP_DISABLE_LE_SECURE_CONNECTIONS,
+          if (interop_match_addr_or_name(INTEROP_DISABLE_LE_SECURE_CONNECTIONS,
                                  (const RawAddress*)&p_cb->pairing_bda)) {
             p_cb->loc_auth_req &= ~SMP_SC_SUPPORT_BIT;
             p_cb->loc_auth_req &= ~SMP_KP_SUPPORT_BIT;
@@ -662,6 +663,17 @@ void smp_process_pairing_public_key(tSMP_CB* p_cb, tSMP_INT_DATA* p_data) {
 
   STREAM_TO_ARRAY(p_cb->peer_publ_key.x, p, BT_OCTET32_LEN);
   STREAM_TO_ARRAY(p_cb->peer_publ_key.y, p, BT_OCTET32_LEN);
+
+  Point pt;
+  memcpy(pt.x, p_cb->peer_publ_key.x, BT_OCTET32_LEN);
+  memcpy(pt.y, p_cb->peer_publ_key.y, BT_OCTET32_LEN);
+
+  if (!ECC_ValidatePoint(pt)) {
+    android_errorWriteLog(0x534e4554, "72377774");
+    smp_sm_event(p_cb, SMP_AUTH_CMPL_EVT, &reason);
+    return;
+  }
+
   p_cb->flags |= SMP_PAIR_FLAG_HAVE_PEER_PUBL_KEY;
 
   smp_wait_for_both_public_keys(p_cb, NULL);
@@ -1389,10 +1401,7 @@ void smp_idle_terminate(tSMP_CB* p_cb, tSMP_INT_DATA* p_data) {
  * Description  apply default connection parameter for pairing process
  ******************************************************************************/
 void smp_fast_conn_param(tSMP_CB* p_cb, tSMP_INT_DATA* p_data) {
-  BD_NAME bdname;
-
-  if (!BTM_GetRemoteDeviceName(p_cb->pairing_bda, bdname) || !*bdname ||
-     (!interop_match_name(INTEROP_DISABLE_LE_CONN_UPDATES, (const char*) bdname))) {
+  if (!interop_match_addr_or_name(INTEROP_DISABLE_LE_CONN_UPDATES, &p_cb->pairing_bda)) {
     /* Disable L2CAP connection parameter updates while bonding since
     some peripherals are not able to revert to fast connection parameters
     during the start of service discovery. Connection paramter updates

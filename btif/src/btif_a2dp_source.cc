@@ -60,7 +60,7 @@ using system_bt_osi::A2dpSessionMetrics;
  * layers we might need to temporarily buffer up data.
  */
 #define MAX_OUTPUT_A2DP_FRAME_QUEUE_SZ (MAX_PCM_FRAME_NUM_PER_TICK * 2)
-#define BTIF_UNBLOCK_AUDIO_START_TOUT 2000
+#define BTIF_UNBLOCK_AUDIO_START_TOUT 3000
 #define BTIF_REMOTE_START_TOUT 3000
 enum {
   BTIF_A2DP_SOURCE_STATE_OFF,
@@ -511,6 +511,64 @@ bt_status_t btif_a2dp_source_setup_codec(tBTA_AV_HNDL hndl) {
   if (status == BT_STATUS_SUCCESS) {
     /* Init the encoding task */
     btif_a2dp_source_encoder_init();
+
+    A2dpCodecConfig* current_codec = bta_av_get_a2dp_current_codec();
+    btav_a2dp_codec_config_t codec_config;
+    APPL_TRACE_DEBUG("%s: codec_config.codec_type:%d", __func__, codec_config.codec_type);
+
+    //get the current codec config, so that we can get the codec type.
+    if (current_codec != nullptr) {
+      codec_config = current_codec->getCodecConfig();
+    } else {
+      APPL_TRACE_ERROR("%s: current codec is null, returns fail.", __func__);
+      return BT_STATUS_FAIL;
+    }
+
+    uint8_t p_codec_info[AVDT_CODEC_SIZE];
+    memset(p_codec_info, 0, AVDT_CODEC_SIZE);
+
+    //copy peer codec info to p_codec_info
+    if (!current_codec->copyOutOtaCodecConfig(p_codec_info)) {
+      APPL_TRACE_ERROR("%s: Fetching peer codec info returns fail.", __func__);
+      return BT_STATUS_FAIL;
+    }
+
+    //int index = 0;
+    //index = HANDLE_TO_INDEX(hndl);
+    RawAddress peer_bda;
+    btif_av_get_peer_addr(&peer_bda);
+
+    tBT_FLOW_SPEC flow_spec;
+    memset(&flow_spec, 0x00, sizeof(flow_spec));
+
+    flow_spec.flow_direction = 0x00;     /* flow direction - out going */
+    flow_spec.service_type = 0x02;       /* Guaranteed */
+    flow_spec.token_rate = 0x00;         /* bytes/second - no token rate is specified*/
+    flow_spec.token_bucket_size = 0x00;  /* bytes - no token bucket is needed*/
+    flow_spec.latency = 0xFFFFFFFF;      /* microseconds - default value */
+
+    if (codec_config.codec_type == BTAV_A2DP_CODEC_INDEX_SOURCE_SBC) {
+      flow_spec.peak_bandwidth = (345*1000)/8; /* bytes/second */
+
+    } else if (codec_config.codec_type == BTAV_A2DP_CODEC_INDEX_SOURCE_APTX)  {
+      flow_spec.peak_bandwidth = (380*1000)/8; /* bytes/second */
+
+    } else if (codec_config.codec_type == BTAV_A2DP_CODEC_INDEX_SOURCE_APTX_HD) {
+      flow_spec.peak_bandwidth = (660*1000)/8; /* bytes/second */
+
+    } else if (codec_config.codec_type == BTAV_A2DP_CODEC_INDEX_SOURCE_LDAC) {
+      /* For ABR mode default peak bandwidth is 0, for static it will be fetched */
+      uint32_t bitrate = 0;
+      bitrate = A2DP_GetTrackBitRate(p_codec_info);
+      APPL_TRACE_DEBUG(LOG_TAG,"bitrate = %d", bitrate);
+
+      flow_spec.peak_bandwidth = bitrate/8;  /* bytes/second */
+
+    } else if (codec_config.codec_type == BTAV_A2DP_CODEC_INDEX_SOURCE_AAC) {
+      flow_spec.peak_bandwidth = (320*1000)/8; /* bytes/second */
+    }
+    APPL_TRACE_DEBUG("%s: peak_bandwidth: %d", __func__, flow_spec.peak_bandwidth);
+    BTM_FlowSpec (peer_bda, &flow_spec, NULL);
   } else {
     APPL_TRACE_ERROR("%s() can not setup current codec", __func__);
     status = BT_STATUS_FAIL;

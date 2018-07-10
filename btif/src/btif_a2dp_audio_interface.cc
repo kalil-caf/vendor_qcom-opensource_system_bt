@@ -567,8 +567,8 @@ void btif_a2dp_audio_on_stopped(tBTA_AV_STATUS status)
 void btif_a2dp_audio_send_start_req()
 {
   uint8_t resp;
-  resp = btif_a2dp_audio_process_request(A2DP_CTRL_CMD_START);
   Lock lock(mtxBtAudio);
+  resp = btif_a2dp_audio_process_request(A2DP_CTRL_CMD_START);
   if (btAudio != nullptr) {
       auto ret =  btAudio->a2dp_on_started(mapToStatus(resp));
     if (resp != A2DP_CTRL_ACK_PENDING) {
@@ -676,7 +676,7 @@ void btif_a2dp_audio_send_sink_latency()
       sink_latency = btif_get_ba_latency();
   }
   else {
-      sink_latency = btif_av_get_sink_latency();
+      sink_latency = btif_av_get_audio_delay();
   }
   LOG_INFO(LOG_TAG,"send_sink_latency = %d", sink_latency);
   Lock lock(mtxBtAudio);
