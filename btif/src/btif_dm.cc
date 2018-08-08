@@ -138,7 +138,7 @@ using bluetooth::Uuid;
 #define BTIF_DM_DEFAULT_INQ_MAX_DURATION 10
 #define BTIF_DM_MAX_SDP_ATTEMPTS_AFTER_PAIRING 2
 
-#define NUM_TIMEOUT_RETRIES 5
+#define NUM_TIMEOUT_RETRIES 2
 
 #define PROPERTY_PRODUCT_MODEL "ro.product.model"
 #define DEFAULT_LOCAL_NAME_MAX 31
@@ -152,6 +152,8 @@ using bluetooth::Uuid;
 #define BTIF_DM_INTERLEAVE_DURATION_BR_TWO 3
 #define BTIF_DM_INTERLEAVE_DURATION_LE_TWO 4
 #endif
+
+#define BTIF_DM_SDP_DELAY_TIMER_MS 500
 
 #define ENCRYPTED_BREDR 2
 #define ENCRYPTED_LE 4
@@ -231,6 +233,12 @@ typedef struct {
   struct timespec timestamp;
 } btif_bond_event_t;
 
+typedef struct {
+  RawAddress bd_addr;
+  alarm_t *sdp_delay_timer;
+} btif_dm_bl_device_t;
+
+
 #define BTA_SERVICE_ID_TO_SERVICE_MASK(id) (1 << (id))
 
 #define MAX_BTIF_BOND_EVENT_ENTRIES 15
@@ -248,6 +256,8 @@ static uid_set_t* uid_set = NULL;
 static btif_bond_event_t btif_dm_bond_events[MAX_BTIF_BOND_EVENT_ENTRIES + 1];
 
 static std::mutex bond_event_lock;
+
+static btif_dm_bl_device_t bl_device;
 
 /* |btif_num_bond_events| keeps track of the total number of events and can be
    greater than |MAX_BTIF_BOND_EVENT_ENTRIES| */
@@ -337,14 +347,42 @@ static void btif_dm_data_free(uint16_t event, tBTA_DM_SEC* dm_sec) {
     osi_free_and_reset((void**)&dm_sec->ble_key.p_key_value);
 }
 
-void btif_dm_init(uid_set_t* set) { uid_set = set; }
+void btif_dm_init(uid_set_t* set) {
+  uid_set = set;
+  bl_device.sdp_delay_timer = alarm_new("btif_dm.sdp_delay_timer");
+}
 
 void btif_dm_cleanup(void) {
+  alarm_free(bl_device.sdp_delay_timer);
   if (uid_set) {
     uid_set_destroy(uid_set);
     uid_set = NULL;
   }
 }
+
+static void btif_dm_sdp_delay_timer_cback(void* data) {
+
+  BTIF_TRACE_DEBUG("%s: initiating SDP after delay ", __func__);
+  // Ensure inquiry is stopped before attempting service discovery
+  btif_dm_cancel_discovery();
+
+  /* Trigger SDP on the device */
+  pairing_cb.sdp_attempts = 1;
+  btif_dm_get_remote_services_by_transport((RawAddress*)data, BT_TRANSPORT_BR_EDR);
+}
+
+void btif_dm_sdp_delay_timer(const RawAddress * bl_bdaddr) {
+
+  RawAddress   bl_dev_bdaddr = *bl_bdaddr;
+
+  if (!bl_device.sdp_delay_timer) {
+    BTIF_TRACE_ERROR("%s:unable to allocate sdp_delay_timer",__func__);
+    return;
+  }
+  alarm_set(bl_device.sdp_delay_timer, BTIF_DM_SDP_DELAY_TIMER_MS,
+            btif_dm_sdp_delay_timer_cback, &bl_dev_bdaddr);
+  BTIF_TRACE_DEBUG("%s: sdp delay timer started", __func__);
+ }
 
 bt_status_t btif_in_execute_service_request(tBTA_SERVICE_ID service_id,
                                             bool b_enable) {
@@ -1236,7 +1274,7 @@ static void btif_dm_auth_cmpl_evt(tBTA_DM_AUTH_CMPL* p_auth_cmpl) {
     // derivation to allow bond state change notification for the BR/EDR transport
     // so that the subsequent BR/EDR connections to the remote can use the derived
     // link key.
-    
+
     if ((p_auth_cmpl->bd_addr != pairing_cb.bd_addr) &&
         (!pairing_cb.ble.is_penc_key_rcvd)) {
       LOG_INFO(LOG_TAG,
@@ -1250,24 +1288,9 @@ static void btif_dm_auth_cmpl_evt(tBTA_DM_AUTH_CMPL* p_auth_cmpl) {
                                   NULL, p_auth_cmpl->dev_type);
     pairing_cb.timeout_retries = 0;
 
-    if (check_sdp_bl(&bd_addr) && check_cod_hid(&bd_addr)) {
-      bond_state_changed(BT_STATUS_SUCCESS, bd_addr, BT_BOND_STATE_BONDED);
-      LOG_WARN(LOG_TAG,
-               "%s: HID Connection from "
-               "blacklisted device, skipping sdp",
-               __func__);
-      bt_property_t prop;
-      Uuid uuid = Uuid::From16Bit(UUID_SERVCLASS_HUMAN_INTERFACE);
-
-      prop.type = BT_PROPERTY_UUIDS;
-      prop.val = &uuid;
-      prop.len = Uuid::kNumBytes128;
-
-      /* Also write this to the NVRAM */
-      status = btif_storage_set_remote_device_property(&bd_addr, &prop);
-      /* Send the event to the BTIF */
-      HAL_CBACK(bt_hal_cbacks, remote_device_properties_cb, BT_STATUS_SUCCESS,
-                &bd_addr, 1, &prop);
+    if (!(pairing_cb.is_local_initiated ) && check_cod_hid(&bd_addr)) {
+      BTIF_TRACE_DEBUG("%s: btif_dm_sdp_delay_timer started",__func__);
+      btif_dm_sdp_delay_timer(&bd_addr);
     } else {
       status = BT_STATUS_SUCCESS;
       state = BT_BOND_STATE_BONDED;
@@ -1299,9 +1322,7 @@ static void btif_dm_auth_cmpl_evt(tBTA_DM_AUTH_CMPL* p_auth_cmpl) {
     switch (p_auth_cmpl->fail_reason) {
       case HCI_ERR_PAGE_TIMEOUT:
       case HCI_ERR_LMP_RESPONSE_TIMEOUT:
-        if ((pairing_cb.timeout_retries == NUM_TIMEOUT_RETRIES) ||
-           (interop_match_addr_or_name(INTEROP_AUTO_RETRY_PAIRING, &bd_addr) &&
-            pairing_cb.timeout_retries)) {
+        if (pairing_cb.timeout_retries) {
           BTIF_TRACE_WARNING("%s() - Pairing timeout; retrying (%d) ...",
                              __func__, pairing_cb.timeout_retries);
           --pairing_cb.timeout_retries;
@@ -1571,11 +1592,15 @@ static void btif_dm_search_services_evt(uint16_t event, char* p_param) {
   BTIF_TRACE_EVENT("%s:  event = %d", __func__, event);
   switch (event) {
     case BTA_DM_DISC_RES_EVT: {
-      uint32_t i = 0;
+      uint32_t i = 0, j = 0;
       bt_property_t prop[2];
       int num_properties = 0;
       bt_status_t ret;
       bool is_tws_plus_device = false;
+      Uuid remote_uuids[BT_MAX_NUM_UUIDS];
+      Uuid missed_remote_uuids[BT_MAX_NUM_UUIDS];
+      uint8_t missing_uuids_len = 0;
+      bt_property_t remote_uuid_prop;
 
       RawAddress& bd_addr = p_data->disc_res.bd_addr;
 
@@ -1633,7 +1658,51 @@ static void btif_dm_search_services_evt(uint16_t event, char* p_param) {
         }
       }
 
-      if (p_data->disc_res.num_uuids != 0) {
+      // updates extra uuids which are discovered during
+      // new sdp search to existing uuid list present in conf file.
+      // If conf file has more UUIDs than the sdp search, it will
+      // update the conf file UUIDs as the final UUIDs
+      BTIF_STORAGE_FILL_PROPERTY(&remote_uuid_prop, BT_PROPERTY_UUIDS,
+                                 sizeof(remote_uuids), remote_uuids);
+      btif_storage_get_remote_device_property(&bd_addr,
+                                        &remote_uuid_prop);
+      if(remote_uuid_prop.len && p_data->disc_res.result == BTA_SUCCESS) {
+        // compare now
+        bool uuid_found = false;
+        uint8_t uuid_len = remote_uuid_prop.len / sizeof(Uuid);
+        for (i = 0; i < p_data->disc_res.num_uuids; i++) {
+          uuid_found = false;
+          Uuid* disc_uuid =  reinterpret_cast<Uuid*> (p_data->disc_res.p_uuid_list + i);
+          for (j = 0; j < uuid_len; j++) {
+            Uuid* base_uuid =  reinterpret_cast<Uuid*> (remote_uuid_prop.val) + j;
+            if(*disc_uuid == *base_uuid) {
+              uuid_found = true;
+              break;
+            }
+          }
+          if(!uuid_found) {
+            BTIF_TRACE_WARNING("%s:new uuid found ", __func__);
+            memcpy(&missed_remote_uuids[missing_uuids_len++], disc_uuid, sizeof(Uuid));
+          }
+        }
+
+        // add the missing uuids now
+        if(missing_uuids_len) {
+          BTIF_TRACE_WARNING("%s :missing_uuids_len = %d ", __func__, missing_uuids_len);
+          for (j = 0; j < missing_uuids_len &&
+             (unsigned long)remote_uuid_prop.len < BT_MAX_NUM_UUIDS * sizeof(Uuid); j++) {
+            memcpy(&remote_uuids[uuid_len + j], &missed_remote_uuids[j], sizeof(Uuid));
+            remote_uuid_prop.len += sizeof(Uuid);
+          }
+        }
+        prop[0].type = BT_PROPERTY_UUIDS;
+        prop[0].val = remote_uuids;
+        prop[0].len = remote_uuid_prop.len;
+        ret = btif_storage_set_remote_device_property(&bd_addr, &prop[0]);
+        ASSERTC(ret == BT_STATUS_SUCCESS, "storing remote services failed",
+                ret);
+        num_properties++;
+      } else if (p_data->disc_res.num_uuids != 0) {
         /* Also write this to the NVRAM */
         ret = btif_storage_set_remote_device_property(&bd_addr, &prop[0]);
         ASSERTC(ret == BT_STATUS_SUCCESS, "storing remote services failed",

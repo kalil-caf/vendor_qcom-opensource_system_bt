@@ -200,6 +200,7 @@ extern int btif_max_av_clients;
 static void bta_av_api_set_tws_earbud_role(tBTA_AV_DATA * p_data);
 static void bta_av_api_set_is_tws_device(tBTA_AV_DATA * p_data);
 #endif
+
 /* action functions */
 const tBTA_AV_NSM_ACT bta_av_nsm_act[] = {
     bta_av_api_enable,       /* BTA_AV_API_ENABLE_EVT */
@@ -223,6 +224,7 @@ const tBTA_AV_NSM_ACT bta_av_nsm_act[] = {
     bta_av_api_update_max_av_clients,
     bta_av_api_enable_multicast,    /* BTA_AV_ENABLE_MULTICAST_EVT */
     bta_av_rc_collission_detected, /* BTA_AV_RC_COLLISSION_DETECTED_EVT */
+    bta_av_update_enc_mode, /* BTA_AV_UPDATE_ENCODER_MODE_EVT */
 #if (TWS_ENABLED == TRUE)
     bta_av_api_set_tws_earbud_role, /* BTA_AV_SET_EARBUD_ROLE_EVT */
     bta_av_api_set_is_tws_device, /* BTA_AV_SET_TWS_DEVICE_EVT */
@@ -332,6 +334,23 @@ tBTA_AV_SCB* bta_av_hndl_to_scb(uint16_t handle) {
     p_scb = bta_av_cb.p_scb[idx - 1];
   }
   return p_scb;
+}
+
+/*******************************************************************************
+**
+** Function         bta_avk_is_avdt_sync
+**
+** Description      If the current connection supports AVDT1.3
+**
+** Returns          true for supports AVDT1.3, false for not.
+**
+*******************************************************************************/
+bool bta_avk_is_avdt_sync(uint16_t handle) {
+  tBTA_AV_SCB* p_scb = bta_av_hndl_to_scb(handle);
+  if (p_scb && (p_scb->avdt_version >= AVDT_VERSION_SYNC))
+    return true;
+  else
+    return false;
 }
 
 /*******************************************************************************
@@ -630,6 +649,25 @@ static void bta_av_api_register(tBTA_AV_DATA* p_data) {
       for (int i = codec_index_min; i < codec_index_max; i++) {
         btav_a2dp_codec_index_t codec_index =
             static_cast<btav_a2dp_codec_index_t>(i);
+        APPL_TRACE_DEBUG("%s: codec_index = %d", __func__, codec_index);
+        A2dpCodecs* a2dp_codecs = bta_av_get_a2dp_codecs();
+        if (a2dp_codecs != nullptr) {
+          std::list<A2dpCodecConfig*> list_codec =
+                        a2dp_codecs->orderedSourceCodecs();
+          bool found = false;
+          for (auto it = list_codec.begin(); it != list_codec.end(); it++) {
+            if ((*it)->codecIndex() == codec_index) {
+              APPL_TRACE_DEBUG("%s: Hit the codec in ordered source", __func__);
+              found = true;
+              break;
+            }
+          }
+          if (!found) {
+            APPL_TRACE_DEBUG("%s: Can't support codec in ordered source", __func__);
+            continue;
+          }
+        }
+
         if (!(*bta_av_a2dp_cos.init)(codec_index, &cs.cfg)) {
           continue;
         }
@@ -1631,6 +1669,8 @@ const char* bta_av_evt_code(uint16_t evt_code) {
       return "API_STOP";
     case BTA_AV_ENABLE_MULTICAST_EVT:
       return "MULTICAST_ENABLE";
+    case BTA_AV_UPDATE_ENCODER_MODE_EVT:
+      return "UPDATE_ENCODER_MODE";
     default:
       return "unknown";
   }

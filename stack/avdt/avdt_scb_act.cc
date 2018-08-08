@@ -37,7 +37,9 @@
 #include "bt_types.h"
 #include "bt_utils.h"
 #include "btu.h"
+#include "btif/include/btif_av.h"
 #include "osi/include/osi.h"
+#include "stack/include/a2dp_sbc_constants.h"
 
 /* This table is used to lookup the callback event that matches a particular
  * state machine API request event.  Note that state machine API request
@@ -56,6 +58,13 @@ const uint8_t avdt_scb_cback_evt[] = {
     AVDT_SECURITY_CFM_EVT, /* API_SECURITY_REQ_EVT */
     0                      /* API_ABORT_REQ_EVT (no event) */
 };
+
+#define INIT_DELAY_RPT    4000      /* Initial deg=fault Delay Sent after SETCONFIG*/
+                                    /* Delay value given is 1/10 millisecond */
+#define accure_range      150       /* Value difference considered for sending next DELAY_REPORT*/
+                                    /* Delay value given is 1/10 millisecond */
+static alarm_t* delay_rpt_alarm = NULL;
+static uint16_t reported_delay = INIT_DELAY_RPT;
 
 /*******************************************************************************
  *
@@ -588,6 +597,7 @@ bool avdt_check_sep_state(tAVDT_SCB *p_scb) {
  ******************************************************************************/
 void avdt_scb_hdl_setconfig_cmd(tAVDT_SCB* p_scb, tAVDT_SCB_EVT* p_data) {
   tAVDT_CFG* p_cfg;
+  tA2DP_CODEC_TYPE codec_type;
   AVDT_TRACE_WARNING("avdt_scb_hdl_setconfig_cmd: SCB in use: %d, Conn in progress: %d, avdt_check_sep_state: %d",
        p_scb->in_use, avdt_cb.conn_in_progress, avdt_check_sep_state(p_scb));
 
@@ -596,8 +606,11 @@ void avdt_scb_hdl_setconfig_cmd(tAVDT_SCB* p_scb, tAVDT_SCB_EVT* p_data) {
     A2DP_DumpCodecInfo(p_scb->cs.cfg.codec_info);
     A2DP_DumpCodecInfo(p_data->msg.config_cmd.p_cfg->codec_info);
     p_cfg = p_data->msg.config_cmd.p_cfg;
-    if (A2DP_GetCodecType(p_scb->cs.cfg.codec_info) ==
-        A2DP_GetCodecType(p_cfg->codec_info)) {
+    codec_type = A2DP_GetCodecType(p_cfg->codec_info);
+    AVDT_TRACE_DEBUG("%s: Incoming codec_type: %x, min/max bitpool: %x/%x", __func__, codec_type,
+                       p_cfg->codec_info[A2DP_SBC_IE_MIN_BITPOOL_OFFSET],
+                       p_cfg->codec_info[A2DP_SBC_IE_MAX_BITPOOL_OFFSET]);
+    if (A2DP_GetCodecType(p_scb->cs.cfg.codec_info) == codec_type) {
       /* set sep as in use */
       p_scb->in_use = true;
 
@@ -605,6 +618,39 @@ void avdt_scb_hdl_setconfig_cmd(tAVDT_SCB* p_scb, tAVDT_SCB_EVT* p_data) {
       p_scb->p_ccb = avdt_ccb_by_idx(p_data->msg.config_cmd.hdr.ccb_idx);
       avdt_set_scbs_busy(p_scb);
       p_scb->peer_seid = p_data->msg.config_cmd.int_seid;
+      if (codec_type == A2DP_MEDIA_CT_SBC) {
+        //minbitpool < 2, then set minbitpool = 2
+        if ((p_cfg->codec_info[A2DP_SBC_IE_MIN_BITPOOL_OFFSET]) < A2DP_SBC_IE_MIN_BITPOOL) {
+          p_cfg->codec_info[A2DP_SBC_IE_MIN_BITPOOL_OFFSET] = A2DP_SBC_IE_MIN_BITPOOL;
+          AVDT_TRACE_DEBUG("%s: Incoming connection set min bitpool: %x", __func__,
+                              p_cfg->codec_info[A2DP_SBC_IE_MIN_BITPOOL_OFFSET]);
+        }
+
+        //minbitpool > 250, then set minbitpool = 250
+        if ((p_cfg->codec_info[A2DP_SBC_IE_MIN_BITPOOL_OFFSET]) > A2DP_SBC_IE_MAX_BITPOOL) {
+          p_cfg->codec_info[A2DP_SBC_IE_MIN_BITPOOL_OFFSET] = A2DP_SBC_IE_MAX_BITPOOL;
+          AVDT_TRACE_DEBUG("%s: Incoming connection set min bitpool: %x", __func__,
+                              p_cfg->codec_info[A2DP_SBC_IE_MIN_BITPOOL_OFFSET]);
+        }
+
+        //maxbitpool > 250, then set minbitpool = 250
+        if ((p_cfg->codec_info[A2DP_SBC_IE_MAX_BITPOOL_OFFSET]) > A2DP_SBC_IE_MAX_BITPOOL) {
+          p_cfg->codec_info[A2DP_SBC_IE_MAX_BITPOOL_OFFSET] = A2DP_SBC_IE_MAX_BITPOOL;
+          AVDT_TRACE_DEBUG("%s: Incoming connection set max bitpool: %x", __func__,
+                              p_cfg->codec_info[A2DP_SBC_IE_MAX_BITPOOL_OFFSET]);
+        }
+
+        //minbitpool > maxbitpool, then set maxbitpool = minbitpool
+        if ((p_cfg->codec_info[A2DP_SBC_IE_MIN_BITPOOL_OFFSET]) >
+            (p_cfg->codec_info[A2DP_SBC_IE_MAX_BITPOOL_OFFSET])) {
+          p_cfg->codec_info[A2DP_SBC_IE_MAX_BITPOOL_OFFSET] =
+                              p_cfg->codec_info[A2DP_SBC_IE_MIN_BITPOOL_OFFSET];
+          AVDT_TRACE_DEBUG("%s: Incoming connection minbitpool set by remote exceeds"
+                           "maxbitpool value, So set maxbitbool to minbitpool: %x to %x",
+                           __func__, p_cfg->codec_info[A2DP_SBC_IE_MAX_BITPOOL_OFFSET],
+                                     p_cfg->codec_info[A2DP_SBC_IE_MIN_BITPOOL_OFFSET]);
+        }
+      }
       memcpy(&p_scb->req_cfg, p_cfg, sizeof(tAVDT_CFG));
       /* call app callback */
       /* handle of scb- which is same as sep handle of bta_av_cb.p_scb*/
@@ -666,6 +712,12 @@ void avdt_scb_hdl_setconfig_rsp(tAVDT_SCB* p_scb,
     /* save configuration */
     memcpy(&p_scb->curr_cfg, &p_scb->req_cfg, sizeof(tAVDT_CFG));
     p_scb->role = AVDT_CONF_INT;
+
+    if ((p_scb->cs.tsep == AVDT_TSEP_SNK) && (p_scb->curr_cfg.psc_mask & AVDT_PSC_DELAY_RPT)) {
+      reported_delay = INIT_DELAY_RPT;
+      AVDT_TRACE_DEBUG(" %s ~~ support DELAY_RPT , begin init Delay report procedure",__func__);
+      AVDT_DelayReport(avdt_scb_to_hdl(p_scb), p_scb->peer_seid, reported_delay);
+    }
 
     if (!(p_scb->curr_cfg.psc_mask & AVDT_PSC_DELAY_RPT)) {
       /* initiate open */
@@ -784,6 +836,11 @@ void avdt_scb_hdl_tc_close(tAVDT_SCB* p_scb, tAVDT_SCB_EVT* p_data) {
 
   alarm_cancel(p_scb->transport_channel_timer);
 
+  if (delay_rpt_alarm != NULL) {
+    alarm_free(delay_rpt_alarm);
+    delay_rpt_alarm = NULL;
+  }
+
   if ((p_scb->role == AVDT_CLOSE_INT) || (p_scb->role == AVDT_OPEN_INT)) {
     /* tell ccb we're done with signaling channel */
     avdt_ccb_event(p_ccb, AVDT_CCB_UL_CLOSE_EVT, NULL);
@@ -861,6 +918,17 @@ void avdt_scb_hdl_delay_rpt_cmd(tAVDT_SCB* p_scb, tAVDT_SCB_EVT* p_data) {
  *
  ******************************************************************************/
 void avdt_scb_hdl_delay_rpt_rsp(tAVDT_SCB* p_scb, tAVDT_SCB_EVT* p_data) {
+
+  if ((p_scb->cs.tsep == AVDT_TSEP_SNK) &&
+      (p_scb->state == AVDT_SCB_CONF_ST) && (p_scb->role == AVDT_CONF_INT)) {
+    tAVDT_EVT_HDR single;
+    tAVDT_SCB_EVT avdt_scb_evt;
+
+    single.seid = p_scb->peer_seid;
+    avdt_scb_evt.msg.single = single;
+    avdt_scb_event(p_scb, AVDT_SCB_API_OPEN_REQ_EVT, &avdt_scb_evt);
+  }
+
   (*p_scb->cs.p_ctrl_cback)(
       avdt_scb_to_hdl(p_scb), p_scb->p_ccb ? &p_scb->p_ccb->peer_addr : NULL,
       AVDT_DELAY_REPORT_CFM_EVT, (tAVDT_CTRL*)&p_data->msg.hdr);
@@ -901,6 +969,35 @@ void avdt_scb_hdl_tc_close_sto(tAVDT_SCB* p_scb, tAVDT_SCB_EVT* p_data) {
 
 /*******************************************************************************
  *
+ * Function         avdt_delay_rpt_tmr_hdlr
+ *
+ * Description      Timer to trigger checking average_delay,
+ *                  compare the latest reported delay,
+ *                  if the current delay is out of accure range,
+ *                  start a new Delay report procedure.
+ *
+ * Returns          Nothing.
+ *
+ ******************************************************************************/
+static void avdt_delay_rpt_tmr_hdlr(void* data) {
+  uint64_t average_delay = btif_get_average_delay();
+
+  if (average_delay == 0)
+    return;
+
+  uint16_t delay_ms = (uint16_t)(average_delay / 100000); /* report value is in 1/10 millisecond */
+
+  if (abs(reported_delay - delay_ms) >= accure_range) {
+    reported_delay = delay_ms;
+
+    AVDT_TRACE_DEBUG(" %s ~~ average delay is changed, update delay report  ",__func__);
+    tAVDT_SCB *p_scb = (tAVDT_SCB *)data;
+    AVDT_DelayReport(avdt_scb_to_hdl(p_scb), p_scb->peer_seid, reported_delay);
+  }
+}
+
+/*******************************************************************************
+ *
  * Function         avdt_scb_hdl_tc_open
  *
  * Description      This function is called when the transport channel is
@@ -918,6 +1015,13 @@ void avdt_scb_hdl_tc_open(tAVDT_SCB* p_scb, tAVDT_SCB_EVT* p_data) {
 #endif
 
   alarm_cancel(p_scb->transport_channel_timer);
+
+  if ((p_scb->cs.tsep == AVDT_TSEP_SNK) && (p_scb->curr_cfg.psc_mask & AVDT_PSC_DELAY_RPT)) {
+    delay_rpt_alarm = alarm_new_periodic("avdt.delayreport");
+    alarm_set(delay_rpt_alarm, (period_ms_t)1000 ,(alarm_callback_t)avdt_delay_rpt_tmr_hdlr,
+              (void*)p_scb);
+    AVDT_TRACE_DEBUG(" %s ~~ start update delay report timer",__func__);
+  }
 
   event =
       (p_scb->role == AVDT_OPEN_INT) ? AVDT_OPEN_CFM_EVT : AVDT_OPEN_IND_EVT;
@@ -1336,6 +1440,11 @@ void avdt_scb_snd_setconfig_rsp(tAVDT_SCB* p_scb, tAVDT_SCB_EVT* p_data) {
     p_scb->role = AVDT_CONF_ACP;
 
     avdt_msg_send_rsp(p_scb->p_ccb, AVDT_SIG_SETCONFIG, &p_data->msg);
+    if ((p_scb->cs.tsep == AVDT_TSEP_SNK) && (p_scb->curr_cfg.psc_mask & AVDT_PSC_DELAY_RPT)) {
+      reported_delay = INIT_DELAY_RPT;
+      AVDT_TRACE_DEBUG(" %s ~~ support DELAY_RPT , begin init Delay report procedure", __func__);
+      AVDT_DelayReport(avdt_scb_to_hdl(p_scb), p_scb->peer_seid, reported_delay);
+    }
   }
 }
 
