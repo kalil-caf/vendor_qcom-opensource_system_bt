@@ -84,6 +84,7 @@
 
 extern bool isDevUiReq;
 bool isBitRateChange = false;
+bool isBitsPerSampleChange = false;
 static int reconfig_a2dp_param_id = 0;
 static int reconfig_a2dp_param_val = 0;
 
@@ -1575,9 +1576,10 @@ static bool btif_av_state_opened_handler(btif_sm_event_t event, void* p_data,
       if (btif_av_is_split_a2dp_enabled()) {
         if (codec_cfg_change && btif_av_cb[index].current_playing == TRUE) {
           codec_cfg_change = false;
-          if (!isBitRateChange)
+          if (!isBitRateChange || !isBitsPerSampleChange)
             reconfig_a2dp = TRUE;
           isBitRateChange = false;
+          isBitsPerSampleChange = false;
           btav_a2dp_codec_config_t codec_config;
           std::vector<btav_a2dp_codec_config_t> codecs_local_capabilities;
           std::vector<btav_a2dp_codec_config_t> codecs_selectable_capabilities;
@@ -1883,9 +1885,10 @@ static bool btif_av_state_started_handler(btif_sm_event_t event, void* p_data,
       btif_report_source_codec_state(p_data, bt_addr);
       if (btif_av_is_split_a2dp_enabled() && (codec_cfg_change)) {
         codec_cfg_change = false;
-        if (!isBitRateChange)
+        if (!isBitRateChange || !isBitsPerSampleChange)
           reconfig_a2dp = TRUE;
         isBitRateChange = false;
+        isBitsPerSampleChange = false;
         btav_a2dp_codec_config_t codec_config;
         std::vector<btav_a2dp_codec_config_t> codecs_local_capabilities;
         std::vector<btav_a2dp_codec_config_t> codecs_selectable_capabilities;
@@ -2606,7 +2609,7 @@ static void btif_av_handle_event(uint16_t event, char* p_param) {
        * Directly call the RC handler as we cannot
        * associate any AV handle to it.
        */
-      index = btif_av_idx_by_bdaddr(&p_bta_data->rc_open.peer_addr);
+      index = btif_av_idx_by_bdaddr(&p_bta_data->rc_close.peer_addr);
       if (index == btif_max_av_clients)
         btif_rc_handler(event, (tBTA_AV*)p_bta_data);
       break;
@@ -3468,8 +3471,29 @@ static bt_status_t codec_config_src(const RawAddress& bd_addr,
               if (cp.codec_specific_1 != 0) {
                 reconfig_a2dp_param_id = BITRATE_PARAM_ID;
               }
-            }
+            } else if ((codec_config.bits_per_sample != cp.bits_per_sample) &&
+                     (codec_config.codec_type == BTAV_A2DP_CODEC_INDEX_SOURCE_LDAC)) {
+              switch (cp.bits_per_sample)
+              {
+                case BTAV_A2DP_CODEC_BITS_PER_SAMPLE_16:
+                  reconfig_a2dp_param_val = 16;
+                  break;
+                case BTAV_A2DP_CODEC_BITS_PER_SAMPLE_24:
+                  reconfig_a2dp_param_val = 24;
+                  break;
+                case BTAV_A2DP_CODEC_BITS_PER_SAMPLE_32:
+                  reconfig_a2dp_param_val = 32;
+                  break;
+                case BTAV_A2DP_CODEC_BITS_PER_SAMPLE_NONE:
+                  break;
+
+              }
+              if ((cp.bits_per_sample != 0) && (codec_config.bits_per_sample != 0)) {
+                reconfig_a2dp_param_id = BITSPERSAMPLE_PARAM_ID;
+                isBitsPerSampleChange = true;
+              }
           }
+      }
 
     codec_cfg_change = true;
     isDevUiReq = true;
@@ -4560,6 +4584,10 @@ void btif_av_set_earbud_state(const RawAddress& address, uint8_t earbud_state) {
 void btif_av_set_earbud_role(const RawAddress& address, uint8_t earbud_role) {
   BTIF_TRACE_EVENT("btif_av_set_earbud_role = %d",earbud_role);
   int index = btif_av_idx_by_bdaddr(&(RawAddress&)address);
+  if (index == btif_max_av_clients) {
+    BTIF_TRACE_ERROR("%s: invalid index",__func__);
+    return;
+  }
   BTA_AVSetEarbudRole(earbud_role, btif_av_cb[index].bta_handle);
 }
 #endif
