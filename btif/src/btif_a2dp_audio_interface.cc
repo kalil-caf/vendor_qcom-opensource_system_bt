@@ -125,6 +125,7 @@ static void btif_a2dp_audio_send_mcast_status();
 static void btif_a2dp_audio_send_num_connected_devices();
 static void btif_a2dp_audio_send_connection_status();
 static void btif_a2dp_audio_send_sink_latency();
+void btif_a2dp_update_sink_latency_change();
 extern int btif_max_av_clients;
 extern bool enc_update_in_progress;
 extern tBTA_AV_HNDL btif_av_get_av_hdl_from_idx(int idx);
@@ -390,10 +391,9 @@ void btif_a2dp_audio_on_started(tBTA_AV_STATUS status)
             LOG_INFO(LOG_TAG,"calling method a2dp_on_started");
             auto ret = btAudio->a2dp_on_started(mapToStatus(status));
             if (!ret.isOk()) LOG_ERROR(LOG_TAG,"server died");
+            a2dp_cmd_pending = A2DP_CTRL_CMD_NONE;
           }
         }
-        /* clear pending and queued*/
-        a2dp_cmd_pending = A2DP_CTRL_CMD_NONE;
       }
     } else {
       if (a2dp_cmd_pending == A2DP_CTRL_CMD_START) {
@@ -458,10 +458,9 @@ void btif_a2dp_audio_on_suspended(tBTA_AV_STATUS status)
             LOG_INFO(LOG_TAG,"calling method a2dp_on_suspended");
             auto ret = btAudio->a2dp_on_suspended(mapToStatus(status));
             if (!ret.isOk()) LOG_ERROR(LOG_TAG,"server died");
+            a2dp_cmd_pending = A2DP_CTRL_CMD_NONE;
           }
         }
-        /* clear pending and queued*/
-        a2dp_cmd_pending = A2DP_CTRL_CMD_NONE;
       }
     } else {
       if (a2dp_cmd_pending == A2DP_CTRL_CMD_SUSPEND || a2dp_cmd_pending == A2DP_CTRL_CMD_STOP) {
@@ -537,15 +536,15 @@ void btif_a2dp_audio_on_stopped(tBTA_AV_STATUS status)
               LOG_INFO(LOG_TAG,"calling method a2dp_on_stopped");
               auto ret = btAudio->a2dp_on_stopped(mapToStatus(status));
               if (!ret.isOk()) LOG_ERROR(LOG_TAG,"a2dp_on_stopped: server died");
+              a2dp_cmd_pending = A2DP_CTRL_CMD_NONE;
             } else if ((a2dp_cmd_pending == A2DP_CTRL_CMD_START) &&
                     (!(btif_av_is_under_handoff() || reconfig_a2dp))) {
               LOG_INFO(LOG_TAG, "Remote disconnected when start under progress");
               auto ret = btAudio->a2dp_on_started(mapToStatus(A2DP_CTRL_ACK_DISCONNECT_IN_PROGRESS));
               if (!ret.isOk()) LOG_ERROR(LOG_TAG,"a2dp_on_started: server died");
+              a2dp_cmd_pending = A2DP_CTRL_CMD_NONE;
             }
           }
-          /* clear pending and queued*/
-          a2dp_cmd_pending = A2DP_CTRL_CMD_NONE;
         }
       } else {
         if (a2dp_cmd_pending == A2DP_CTRL_CMD_STOP || a2dp_cmd_pending == A2DP_CTRL_CMD_SUSPEND) {
@@ -685,6 +684,10 @@ void btif_a2dp_audio_send_sink_latency()
     auto ret = btAudio->a2dp_on_get_sink_latency(sink_latency);
     if (!ret.isOk()) LOG_ERROR(LOG_TAG,"server died");
   }
+}
+
+void btif_a2dp_update_sink_latency_change() {
+  btif_a2dp_audio_send_sink_latency();
 }
 
 void on_hidl_server_died() {
