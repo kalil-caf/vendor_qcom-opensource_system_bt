@@ -1060,9 +1060,20 @@ static void btu_hcif_hdl_command_complete(uint16_t opcode, uint8_t* p,
 static void btu_hcif_command_complete_evt_on_task(BT_HDR* event,
                                                   void* context) {
   command_opcode_t opcode;
+  uint8_t hci_evt_code, hci_evt_len;
   uint8_t* stream =
       event->data + event->offset +
       3;  // 2 to skip the event headers, 1 to skip the command credits
+  uint8_t* full_stream =
+      event->data + event->offset;
+
+  STREAM_TO_UINT8(hci_evt_code, full_stream);
+  STREAM_TO_UINT8(hci_evt_len, full_stream);
+
+#if HCI_RAW_CMD_INCLUDED == TRUE
+  btm_hci_event (full_stream, hci_evt_code, hci_evt_len);
+#endif
+
   STREAM_TO_UINT16(opcode, stream);
 
   btu_hcif_hdl_command_complete(
@@ -1363,10 +1374,10 @@ static void btu_hcif_mode_change_evt(uint8_t* p) {
   STREAM_TO_UINT16(handle, p);
   STREAM_TO_UINT8(current_mode, p);
   STREAM_TO_UINT16(interval, p);
+  btm_pm_proc_mode_change(status, handle, current_mode, interval);
 #if (BTM_SCO_WAKE_PARKED_LINK == TRUE)
   btm_sco_chk_pend_unpark(status, handle);
 #endif
-  btm_pm_proc_mode_change(status, handle, current_mode, interval);
 
 #if (HID_DEV_INCLUDED == TRUE && HID_DEV_PM_INCLUDED == TRUE)
   hidd_pm_proc_mode_change(status, current_mode, interval);

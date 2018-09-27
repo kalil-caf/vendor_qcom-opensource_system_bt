@@ -2579,7 +2579,11 @@ static bt_status_t get_play_status_rsp(RawAddress* bd_addr,
   {
       BTIF_TRACE_ERROR("%s: clear remote suspend flag: %d",__FUNCTION__, av_index);
       btif_av_clear_remote_suspend_flag();
-      btif_dispatch_sm_event(BTIF_AV_START_STREAM_REQ_EVT, NULL, 0);
+      if(bluetooth::headset::btif_hf_check_if_sco_connected() == BT_STATUS_SUCCESS) {
+         BTIF_TRACE_ERROR("Ignore sending avdtp_start due to avrcp playing state since sco is present.");
+      } else {
+         btif_dispatch_sm_event(BTIF_AV_START_STREAM_REQ_EVT, NULL, 0);
+      }
   }
 
   avrc_rsp.get_play_status.pdu = AVRC_PDU_GET_PLAY_STATUS;
@@ -2962,6 +2966,10 @@ static bt_status_t register_notification_rsp_sho_mcast(
           (btif_av_check_flag_remote_suspend(av_index))) {
           BTIF_TRACE_ERROR("%s: clear remote suspend flag: %d",__FUNCTION__,av_index );
           btif_av_clear_remote_suspend_flag();
+          if (bluetooth::headset::btif_hf_check_if_sco_connected() == BT_STATUS_SUCCESS) {
+               BTIF_TRACE_ERROR("Ignore sending avdtp_start due to avrcp playing state since sco is present.");
+               break;
+            }
           btif_dispatch_sm_event(BTIF_AV_START_STREAM_REQ_EVT, NULL, 0);
       }
       break;
@@ -3074,6 +3082,10 @@ static bt_status_t register_notification_rsp(
         {
             BTIF_TRACE_ERROR("%s: clear remote suspend flag: %d",__FUNCTION__,av_index );
             btif_av_clear_remote_suspend_flag();
+            if (bluetooth::headset::btif_hf_check_if_sco_connected() == (BT_STATUS_SUCCESS)) {
+               BTIF_TRACE_ERROR("Ignore sending avdtp_start due to avrcp playing state since sco is present.");
+               break;
+            }
             btif_dispatch_sm_event(BTIF_AV_START_STREAM_REQ_EVT, NULL, 0);
         }
         break;
@@ -3213,11 +3225,12 @@ static bt_status_t get_folder_items_list_rsp(RawAddress* bd_addr,
     /* create single item and build response iteratively for all num_items */
     for (item_cnt = 0; item_cnt < num_items; item_cnt++) {
       cur_item = &p_items[item_cnt];
-      item.item_type = p_items->item_type;
+      item.item_type = cur_item->item_type;
       /* build respective item based on item_type. All items should be of same
        * type within
        * a response */
-      switch (p_items->item_type) {
+      BTIF_TRACE_DEBUG("cur_item->item_type:%d,p_items->item_type:%d",cur_item->item_type,p_items->item_type);
+      switch (cur_item->item_type) {
         case AVRC_ITEM_PLAYER: {
           item.u.player.name.charset_id = cur_item->player.charset_id;
           memcpy(&(item.u.player.features), &(cur_item->player.features),
@@ -6659,6 +6672,10 @@ static bt_status_t update_play_status_to_stack(btrc_play_status_t play_state) {
       return BT_STATUS_FAIL;
     }
     btif_av_clear_remote_suspend_flag();
+   if (bluetooth::headset::btif_hf_check_if_sco_connected() == BT_STATUS_SUCCESS) {
+         BTIF_TRACE_ERROR("Ignore sending avdtp_start due to avrcp playing state since sco is present.");
+         return BT_STATUS_SUCCESS;
+     }
     btif_dispatch_sm_event(BTIF_AV_START_STREAM_REQ_EVT, NULL, 0);
   }
   return BT_STATUS_SUCCESS;
