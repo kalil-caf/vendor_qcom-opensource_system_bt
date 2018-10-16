@@ -115,6 +115,8 @@ extern bool btif_av_is_device_disconnecting();
 extern int btif_get_is_remote_started_idx();
 extern bool btif_av_is_playing_on_other_idx(int current_index);
 extern int btif_get_is_remote_started_idx();
+extern bool btif_av_current_device_is_tws();
+extern bool btif_av_is_tws_device_playing(int index);
 extern bool reconfig_a2dp;
 extern bool audio_start_awaited;
 bool deinit_pending = false;
@@ -776,8 +778,7 @@ uint8_t btif_a2dp_audio_process_request(uint8_t cmd)
         }
         bta_av_co_get_peer_params(&peer_param);
         LOG_INFO(LOG_TAG,"enc_update_in_progress = %d", enc_update_in_progress);
-        if ((btif_av_stream_started_ready() == FALSE) ||
-                (enc_update_in_progress == TRUE))
+        if (enc_update_in_progress)
         {
           LOG_INFO(LOG_TAG,"A2DP_CTRL_GET_CODEC_CONFIG: stream not started");
           if (btif_av_is_start_ack_pending() == FALSE)
@@ -1087,7 +1088,22 @@ uint8_t btif_a2dp_audio_process_request(uint8_t cmd)
           btif_dispatch_sm_event(BTIF_AV_SUSPEND_STREAM_REQ_EVT, NULL, 0);
           status = A2DP_CTRL_ACK_PENDING;
           break;
-        }/*pls check if we need to add a condition here */
+        }else if (btif_av_current_device_is_tws()) {
+          //Check if either of the index is streaming
+          for (int i = 0; i < btif_max_av_clients; i++) {
+            if (btif_av_is_tws_device_playing(i)) {
+              APPL_TRACE_DEBUG("Suspend TWS+ stream on index %d",i);
+              btif_dispatch_sm_event(BTIF_AV_SUSPEND_STREAM_REQ_EVT, NULL, 0);
+              status = A2DP_CTRL_ACK_PENDING;
+              break;
+            }
+          }
+          if (status == A2DP_CTRL_ACK_PENDING) {
+            btif_av_clear_remote_suspend_flag();
+            break;
+          }
+        }
+        /*pls check if we need to add a condition here */
         /* If we are not in started state, just ack back ok and let
          * audioflinger close the channel. This can happen if we are
          * remotely suspended, clear REMOTE SUSPEND flag.
@@ -1146,8 +1162,7 @@ uint8_t btif_a2dp_audio_process_request(uint8_t cmd)
         }
         bta_av_co_get_peer_params(&peer_param);
         LOG_INFO(LOG_TAG,"enc_update_in_progress = %d", enc_update_in_progress);
-        if ((btif_av_stream_started_ready() == FALSE) ||
-            (enc_update_in_progress == TRUE))
+        if (enc_update_in_progress)
         {
             LOG_INFO(LOG_TAG,"A2DP_CTRL_GET_CODEC_CONFIG: stream not started");
             status = A2DP_CTRL_ACK_FAILURE;

@@ -292,11 +292,13 @@ bool btif_av_is_tws_device_playing(int index);
 bool btif_av_is_tws_suspend_triggered(int index);
 bool btif_av_is_tws_enabled_for_dev(const RawAddress& rc_addr);
 bool btif_av_is_tws_connected(void);
+bool btif_av_current_device_is_tws(void);
 #else
 #define btif_av_is_tws_device_playing() 0
 #define btif_av_is_tws_suspend_triggered() 0
 #define btif_av_is_tws_enabled_for_dev() 0
 #define btif_av_is_tws_connected() 0
+#define btif_av_current_device_is_tws() 0
 #endif
 #ifdef AVK_BACKPORT
 void btif_av_request_audio_focus(bool enable);
@@ -786,11 +788,6 @@ static bool btif_av_state_idle_handler(btif_sm_event_t event, void* p_data, int 
     case BTIF_AV_CONNECT_REQ_EVT: {
         btif_av_connect_req_t* connect_req_p = (btif_av_connect_req_t*)p_data;
         btif_av_cb[index].peer_bda = *connect_req_p->target_bda;
-        A2dpCodecs* a2dp_codecs = bta_av_get_peer_a2dp_codecs(*connect_req_p->target_bda);
-        if (a2dp_codecs == nullptr) {
-           BTIF_TRACE_DEBUG("%s: initialize peer codecs, if null", __func__);
-           bta_av_co_peer_init(btif_av_cb[index].codec_priorities, index);
-        }
         BTA_AvOpen(btif_av_cb[index].peer_bda, btif_av_cb[index].bta_handle, true,
                    BTA_SEC_AUTHENTICATE, connect_req_p->uuid);
 #if (TWS_ENABLED == TRUE)
@@ -1017,6 +1014,11 @@ static bool btif_av_state_opening_handler(btif_sm_event_t event, void* p_data,
 
   switch (event) {
     case BTIF_SM_ENTER_EVT:
+      //When uncheck media audio from settings UI and try to connect from remote,
+      //a2dp would fail. Then check the media audio from UI, then due to peer codec info
+      //null, so it will not go for A2dp connection. So reinit peer codecs unconditionally.
+      BTIF_TRACE_DEBUG("%s: initialize peer codecs, unconditionally.", __func__);
+      bta_av_co_peer_init(btif_av_cb[index].codec_priorities, index);
       /* inform the application that we are entering connecting state */
       if (bt_av_sink_callbacks != NULL)
         HAL_CBACK(bt_av_sink_callbacks, connection_state_cb,
@@ -1757,8 +1759,8 @@ static bool btif_av_state_opened_handler(btif_sm_event_t event, void* p_data,
           "%s: BTIF_AV_OFFLOAD_START_REQ_EVT: Stream not Started Opened",
           __func__);
       if (btif_av_cb[index].flags & BTIF_AV_FLAG_REMOTE_SUSPEND) {
-        btif_av_cb[index].flags &= ~BTIF_AV_FLAG_REMOTE_SUSPEND;
-        APPL_TRACE_WARNING("%s: Reset remote suspend flag: %d", __func__, btif_av_cb[index].flags);
+        APPL_TRACE_WARNING("%s: Ack success to MM although VSCs of START exchange didn't start : %d",
+                               __func__, btif_av_cb[index].flags);
         btif_a2dp_on_offload_started(BTA_AV_FAIL_UNSUPPORTED);
         break;
       }
@@ -1772,8 +1774,8 @@ static bool btif_av_state_opened_handler(btif_sm_event_t event, void* p_data,
           btif_a2dp_src_vsc.tx_started = TRUE;
           bta_av_vendor_offload_stop(NULL);
         }
-        btif_av_cb[index].flags &= ~BTIF_AV_FLAG_REMOTE_SUSPEND;
-        APPL_TRACE_WARNING("%s: clear remote suspend flag: %d", __func__, btif_av_cb[index].flags);
+        APPL_TRACE_WARNING("%s: Ack success to MM although VSCs of STRAT Failed: %d",
+                               __func__, btif_av_cb[index].flags);
         btif_a2dp_on_offload_started(BTA_AV_FAIL_UNSUPPORTED);
       }
       break;
@@ -3478,69 +3480,75 @@ static bt_status_t codec_config_src(const RawAddress& bd_addr,
         cp.bits_per_sample, cp.channel_mode, cp.codec_specific_1,
         cp.codec_specific_2, cp.codec_specific_3, cp.codec_specific_4);
 
-          A2dpCodecConfig* current_codec = bta_av_get_a2dp_current_codec();
-          if (current_codec != nullptr) {
-            btav_a2dp_codec_config_t codec_config;
-            codec_config = current_codec->getCodecConfig();
-            isBitRateChange = false;
-            if ((codec_config.codec_specific_1 != cp.codec_specific_1) &&
-                (codec_config.codec_type == BTAV_A2DP_CODEC_INDEX_SOURCE_LDAC)) {
-              isBitRateChange = true;
-              switch (cp.codec_specific_1)
-              {
-              case 1000:
-                if ((codec_config.sample_rate == BTAV_A2DP_CODEC_SAMPLE_RATE_44100) ||
+    A2dpCodecConfig* current_codec = bta_av_get_a2dp_current_codec();
+    if (current_codec != nullptr) {
+      btav_a2dp_codec_config_t codec_config;
+      codec_config = current_codec->getCodecConfig();
+      isBitRateChange = false;
+      if ((codec_config.codec_specific_1 != cp.codec_specific_1) &&
+            (codec_config.codec_type == BTAV_A2DP_CODEC_INDEX_SOURCE_LDAC)) {
+        isBitRateChange = true;
+        switch (cp.codec_specific_1)
+        {
+          case 1000:
+            if ((codec_config.sample_rate == BTAV_A2DP_CODEC_SAMPLE_RATE_44100) ||
+                (codec_config.sample_rate == BTAV_A2DP_CODEC_SAMPLE_RATE_88200))
+              reconfig_a2dp_param_val = 909000;
+            else
+              reconfig_a2dp_param_val = 990000;
+            break;
+          case 1001:
+            if ((codec_config.sample_rate == BTAV_A2DP_CODEC_SAMPLE_RATE_44100) ||
                   (codec_config.sample_rate == BTAV_A2DP_CODEC_SAMPLE_RATE_88200))
-                  reconfig_a2dp_param_val = 909000;
-                else
-                  reconfig_a2dp_param_val = 990000;
-                break;
-              case 1001:
-                if ((codec_config.sample_rate == BTAV_A2DP_CODEC_SAMPLE_RATE_44100) ||
-                  (codec_config.sample_rate == BTAV_A2DP_CODEC_SAMPLE_RATE_88200))
-                  reconfig_a2dp_param_val = 606000;
-                else
-                  reconfig_a2dp_param_val = 660000;
-                break;
-              case 1002:
-                if ((codec_config.sample_rate == BTAV_A2DP_CODEC_SAMPLE_RATE_44100) ||
-                  (codec_config.sample_rate == BTAV_A2DP_CODEC_SAMPLE_RATE_88200))
-                  reconfig_a2dp_param_val = 303000;
-                else
-                  reconfig_a2dp_param_val = 330000;
-                break;
-              case 1003:
-                reconfig_a2dp_param_val = 0;
-                break;
-              }
-              if (cp.codec_specific_1 != 0) {
-                reconfig_a2dp_param_id = BITRATE_PARAM_ID;
-              }
-            } else if ((codec_config.bits_per_sample != cp.bits_per_sample) &&
-                     (codec_config.codec_type == BTAV_A2DP_CODEC_INDEX_SOURCE_LDAC)) {
-              switch (cp.bits_per_sample)
-              {
-                case BTAV_A2DP_CODEC_BITS_PER_SAMPLE_16:
-                  reconfig_a2dp_param_val = 16;
-                  break;
-                case BTAV_A2DP_CODEC_BITS_PER_SAMPLE_24:
-                  reconfig_a2dp_param_val = 24;
-                  break;
-                case BTAV_A2DP_CODEC_BITS_PER_SAMPLE_32:
-                  reconfig_a2dp_param_val = 32;
-                  break;
-                case BTAV_A2DP_CODEC_BITS_PER_SAMPLE_NONE:
-                  break;
+              reconfig_a2dp_param_val = 606000;
+            else
+              reconfig_a2dp_param_val = 660000;
+            break;
+          case 1002:
+            if ((codec_config.sample_rate == BTAV_A2DP_CODEC_SAMPLE_RATE_44100) ||
+                (codec_config.sample_rate == BTAV_A2DP_CODEC_SAMPLE_RATE_88200))
+              reconfig_a2dp_param_val = 303000;
+            else
+              reconfig_a2dp_param_val = 330000;
+            break;
+          case 1003:
+            reconfig_a2dp_param_val = 0;
+            break;
+        }
+        if (cp.codec_specific_1 != 0) {
+          reconfig_a2dp_param_id = BITRATE_PARAM_ID;
+        }
+      } else if ((codec_config.bits_per_sample != cp.bits_per_sample) &&
+               (codec_config.codec_type == BTAV_A2DP_CODEC_INDEX_SOURCE_LDAC)) {
+          switch (cp.bits_per_sample)
+          {
+            case BTAV_A2DP_CODEC_BITS_PER_SAMPLE_16:
+              reconfig_a2dp_param_val = 16;
+              break;
+            case BTAV_A2DP_CODEC_BITS_PER_SAMPLE_24:
+              reconfig_a2dp_param_val = 24;
+              break;
+            case BTAV_A2DP_CODEC_BITS_PER_SAMPLE_32:
+              reconfig_a2dp_param_val = 32;
+              break;
+            case BTAV_A2DP_CODEC_BITS_PER_SAMPLE_NONE:
+              break;
 
-              }
-              if ((cp.bits_per_sample != 0) && (codec_config.bits_per_sample != 0)) {
-                reconfig_a2dp_param_id = BITSPERSAMPLE_PARAM_ID;
-                isBitsPerSampleChange = true;
-              }
           }
-      }
+          if ((cp.bits_per_sample != 0) && (codec_config.bits_per_sample != 0)) {
+            reconfig_a2dp_param_id = BITSPERSAMPLE_PARAM_ID;
+            isBitsPerSampleChange = true;
+          }
+        }
+    }
 
-    codec_cfg_change = true;
+    if (cp.codec_specific_4 == 0 ||
+         cp.codec_type != BTAV_A2DP_CODEC_INDEX_SOURCE_APTX_ADAPTIVE)
+      codec_cfg_change = true;
+    else {
+      BTIF_TRACE_WARNING("%s: Dont set codec_cfg_change for Aptx mode change call", __func__);
+    }
+
     isDevUiReq = true;
     if (!codec_bda.IsEmpty())
       BTIF_TRACE_DEBUG("%s: previous codec_bda: %s", __func__, codec_bda.ToString().c_str());
@@ -4882,6 +4890,15 @@ bool btif_av_is_tws_enabled_for_dev(const RawAddress& rc_addr) {
 bool btif_av_is_tws_connected() {
   for (int i = 0; i < btif_max_av_clients; i++) {
     if (btif_av_cb[i].tws_device) {
+      BTIF_TRACE_DEBUG("%s",__func__);
+      return true;
+    }
+  }
+  return false;
+}
+bool btif_av_current_device_is_tws() {
+  for (int i = 0; i < btif_max_av_clients; i++) {
+    if (btif_av_cb[i].tws_device && btif_av_cb[i].current_playing) {
       BTIF_TRACE_DEBUG("%s",__func__);
       return true;
     }

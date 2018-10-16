@@ -3606,11 +3606,14 @@ static void bta_dm_remove_sec_dev_entry(const RawAddress& remote_bd_addr) {
       }
     }
   } else {
-    BTM_SecDeleteDevice(remote_bd_addr);
+    // remote_bd_addr comes from security record, which is removed in
+    // BTM_SecDeleteDevice.
+    RawAddress addr_copy = remote_bd_addr;
+    BTM_SecDeleteDevice(addr_copy);
     /* need to remove all pending background connection */
-    BTA_GATTC_CancelOpen(0, remote_bd_addr, false);
+    BTA_GATTC_CancelOpen(0, addr_copy, false);
     /* remove all cached GATT information */
-    BTA_GATTC_Refresh(remote_bd_addr);
+    BTA_GATTC_Refresh(addr_copy);
   }
 }
 
@@ -4133,7 +4136,7 @@ void bta_dm_enable_test_mode(UNUSED_ATTR tBTA_DM_MSG* p_data) {
  *
  ******************************************************************************/
 void bta_dm_disable_test_mode(UNUSED_ATTR tBTA_DM_MSG* p_data) {
-  BTM_DeviceReset(NULL);
+  BTM_HCI_Reset();
 }
 
 /*******************************************************************************
@@ -4996,6 +4999,9 @@ void btm_dm_start_gatt_discovery(const RawAddress& bd_addr) {
       /* don't create ACL for GATT discovery if ACL already disconnected */
           APPL_TRACE_DEBUG("btm_dm_start_gatt_discovery: Not creating acl"
             " for client_if = %d", bta_dm_search_cb.client_if);
+          if (bta_dm_search_cb.gatt_disc_active) {
+            bta_dm_cancel_gatt_discovery(bd_addr);
+          }
           bta_dm_search_cb.gatt_disc_active = false;
     }
   }
