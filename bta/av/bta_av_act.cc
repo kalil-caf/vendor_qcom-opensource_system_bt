@@ -66,6 +66,7 @@
 #include "bta_av_api.h"
 #include "bta_av_int.h"
 #include "l2c_api.h"
+#include "log/log.h"
 #include "osi/include/list.h"
 #include "osi/include/log.h"
 #include "osi/include/osi.h"
@@ -335,6 +336,7 @@ static void bta_av_rc_msg_cback(uint8_t handle, uint8_t label, uint8_t opcode,
     data_len = (uint16_t)p_msg->pass.pass_len;
   }
 
+  APPL_TRACE_IMP("%s data_len: %u", __func__, data_len);
   /* Create a copy of the message */
   tBTA_AV_RC_MSG* p_buf =
       (tBTA_AV_RC_MSG*)osi_malloc(sizeof(tBTA_AV_RC_MSG) + data_len);
@@ -360,6 +362,7 @@ static void bta_av_rc_msg_cback(uint8_t handle, uint8_t label, uint8_t opcode,
 
   if (opcode == AVRC_OP_BROWSE) {
     /* set p_pkt to NULL, so avrc would not free the buffer */
+    APPL_TRACE_IMP("%s browse packet length: %d", __func__, p_msg->browse.browse_len);
     p_msg->browse.p_browse_pkt = NULL;
   }
 
@@ -654,11 +657,15 @@ void bta_av_rc_opened(tBTA_AV_CB* p_cb, tBTA_AV_DATA* p_data) {
       rc_open.peer_features |= BTA_AV_FEAT_RCCT;
 
     if (bta_av_cb.disc != 0) {
-      /* AVRC discover db is in use */
-      APPL_TRACE_IMP("%s avrcp sdp is in progress, sdhl=%d, disc=%d", __func__, shdl, disc);
-      if (shdl != 0 && disc != 0)
-        bta_sys_start_timer(p_scb->avrc_ct_timer, BTA_AV_RC_DISC_RETRY_DELAY_MS,
-                            BTA_AV_AVRC_RETRY_DISC_EVT, disc);
+      if ((bta_av_cb.disc & BTA_AV_HNDL_MSK) != (disc & BTA_AV_HNDL_MSK)) {
+        /* AVRC discover db is in use */
+        APPL_TRACE_IMP("%s avrcp sdp is in progress, sdhl=%d, disc=%d", __func__, shdl, disc);
+        if (shdl != 0 && disc != 0)
+          bta_sys_start_timer(p_scb->avrc_ct_timer, BTA_AV_RC_DISC_RETRY_DELAY_MS,
+                              BTA_AV_AVRC_RETRY_DISC_EVT, disc);
+      } else {
+        APPL_TRACE_DEBUG("%s: avrcp sdp is in progress for same handle, skip sdp", __func__);
+      }
     } else {
       bta_av_rc_disc(disc);
     }
@@ -908,11 +915,16 @@ tBTA_AV_EVT bta_av_proc_meta_cmd(tAVRC_RESPONSE* p_rc_rsp,
       case AVRC_PDU_GET_CAPABILITIES:
         /* process GetCapabilities command without reporting the event to app */
         evt = 0;
+        if (p_vendor->vendor_len != 5) {
+          android_errorWriteLog(0x534e4554, "111893951");
+          p_rc_rsp->get_caps.status = AVRC_STS_INTERNAL_ERR;
+          break;
+        }
         u8 = *(p_vendor->p_vendor_data + 4);
         p = p_vendor->p_vendor_data + 2;
         p_rc_rsp->get_caps.capability_id = u8;
         BE_STREAM_TO_UINT16(u16, p);
-        if ((u16 != 1) || (p_vendor->vendor_len != 5)) {
+        if (u16 != 1) {
           p_rc_rsp->get_caps.status = AVRC_STS_INTERNAL_ERR;
         } else {
           p_rc_rsp->get_caps.status = AVRC_STS_NO_ERROR;
@@ -1151,6 +1163,7 @@ void bta_av_rc_msg(tBTA_AV_CB* p_cb, tBTA_AV_DATA* p_data) {
     av.meta_msg.p_msg = &p_data->rc_msg.msg;
     av.meta_msg.p_data = p_data->rc_msg.msg.browse.p_browse_data;
     av.meta_msg.len = p_data->rc_msg.msg.browse.browse_len;
+    APPL_TRACE_DEBUG("%s: meta msg length: %d", __func__, av.meta_msg.len);
     evt = BTA_AV_META_MSG_EVT;
   }
 
@@ -1667,7 +1680,8 @@ void bta_av_sig_chg(tBTA_AV_DATA* p_data) {
             /* Add 500msec offset to timeout if there is an outstanding
              * incoming connection */
             for (uint32_t i = 0; i < BTA_AV_NUM_LINKS; i++) {
-              if ((p_cb->p_scb[i]->coll_mask & BTA_AV_COLL_INC_TMR) && i != xx)
+              if ((p_cb->p_scb[i] != NULL &&
+                  p_cb->p_scb[i]->coll_mask & BTA_AV_COLL_INC_TMR) && i != xx)
                 timeout += 500;
             }
             APPL_TRACE_DEBUG("%s: AV signalling timer started for index = %d", __func__, xx);
@@ -2162,6 +2176,7 @@ void bta_av_rc_disc_done(UNUSED_ATTR tBTA_AV_DATA* p_data) {
       {
           bta_sys_start_timer(p_scb->avrc_ct_timer, AVRC_CONNECT_RETRY_DELAY_MS,
                                  BTA_AV_SDP_AVRC_DISC_EVT,p_scb->hndl);
+          return;
       }
   }
 #if (BTA_AV_SINK_INCLUDED == TRUE)
