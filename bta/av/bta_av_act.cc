@@ -1660,7 +1660,7 @@ void bta_av_sig_chg(tBTA_AV_DATA* p_data) {
             p_cb->p_scb[xx]->use_rc =
                 true; /* allowing RC for incoming connection */
             bta_av_ssm_execute(p_cb->p_scb[xx], BTA_AV_ACP_CONNECT_EVT, p_data);
-
+            AVDT_AssociateScb(p_cb->p_scb[xx]->hndl,  p_cb->p_scb[xx]->peer_addr);
             /* The Pending Event should be sent as soon as the L2CAP signalling
              * channel
              * is set up, which is NOW. Earlier this was done only after
@@ -2310,7 +2310,8 @@ void bta_av_rc_closed(tBTA_AV_DATA* p_data) {
 
   rc_close.rc_handle = BTA_AV_RC_HANDLE_NONE;
   p_scb = NULL;
-  APPL_TRACE_DEBUG("bta_av_rc_closed rc_handle:%d", p_msg->handle);
+  APPL_TRACE_DEBUG("bta_av_rc_closed rc_handle:%d, peer_addr:%s",
+                  p_msg->handle, p_msg->peer_addr.ToString().c_str());
   for (i = 0; i < BTA_AV_NUM_RCB; i++) {
     p_rcb = &p_cb->rcb[i];
     APPL_TRACE_DEBUG("bta_av_rc_closed rcb[%d] rc_handle:%d, status=0x%x", i,
@@ -2365,6 +2366,8 @@ void bta_av_rc_closed(tBTA_AV_DATA* p_data) {
     rc_close.rc_handle = p_msg->handle;
     rc_close.peer_addr = p_msg->peer_addr;
   }
+  APPL_TRACE_DEBUG("bta_av_rc_closed rc_close handle:%d, peer_addr:%s",
+              rc_close.rc_handle, rc_close.peer_addr.ToString().c_str());
   tBTA_AV bta_av_data;
   bta_av_data.rc_close = rc_close;
   (*p_cb->p_cback)(BTA_AV_RC_CLOSE_EVT, &bta_av_data);

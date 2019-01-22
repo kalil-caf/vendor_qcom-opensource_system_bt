@@ -236,6 +236,9 @@ bool codec_cfg_change = false;
 bool audio_start_awaited = false;
 extern bool enc_update_in_progress;
 extern bool is_block_hal_start;
+#if (TWS_ENABLED == TRUE)
+bool tws_defaultmono_supported = false;
+#endif
 /*SPLITA2DP */
 /* both interface and media task needs to be ready to alloc incoming request */
 #define CHECK_BTAV_INIT()                                                    \
@@ -293,12 +296,18 @@ bool btif_av_is_tws_suspend_triggered(int index);
 bool btif_av_is_tws_enabled_for_dev(const RawAddress& rc_addr);
 bool btif_av_is_tws_connected(void);
 bool btif_av_current_device_is_tws(void);
+bool btif_av_is_idx_tws_device(int index);
+int btif_av_get_tws_pair_idx(int index);
+bool btif_av_is_tws_enable_monocfg(void);
 #else
 #define btif_av_is_tws_device_playing() 0
 #define btif_av_is_tws_suspend_triggered() 0
 #define btif_av_is_tws_enabled_for_dev() 0
 #define btif_av_is_tws_connected() 0
 #define btif_av_current_device_is_tws() 0
+#define btif_av_is_idx_tws_device() 0
+#define btif_av_get_tws_pair_idx() 0
+#define btif_av_is_tws_enable_monocfg() 0
 #endif
 #ifdef AVK_BACKPORT
 void btif_av_request_audio_focus(bool enable);
@@ -935,6 +944,12 @@ static bool btif_av_state_idle_handler(btif_sm_event_t event, void* p_data, int 
       /* change state to open based on the status */
       if (p_bta_data->open.status == BTA_AV_SUCCESS) {
         /* inform the application of the event */
+        if (btif_av_is_split_a2dp_enabled() &&
+          btif_a2dp_audio_if_init != true) {
+          BTIF_TRACE_DEBUG("Got OPEN_EVT in IDLE state, init audio interface");
+          btif_a2dp_audio_interface_init();
+          btif_a2dp_audio_if_init = true;
+        }
         btif_report_connection_state(state, &(btif_av_cb[index].peer_bda));
         btif_sm_change_state(btif_av_cb[index].sm_handle, BTIF_AV_STATE_OPENED);
         btif_report_connection_state_to_ba(state);
@@ -1247,14 +1262,23 @@ static bool btif_av_state_opening_handler(btif_sm_event_t event, void* p_data,
       btif_report_connection_state_to_ba(BTAV_CONNECTION_STATE_DISCONNECTED);
       } break;
 
-    case BTIF_AV_DISCONNECT_REQ_EVT:
+    case BTIF_AV_DISCONNECT_REQ_EVT: {
+       uint8_t peer_handle = BTRC_HANDLE_NONE;
        btif_report_connection_state(BTAV_CONNECTION_STATE_DISCONNECTED,
            &(btif_av_cb[index].peer_bda));
+       if (!btif_av_cb[index].peer_bda.IsEmpty())
+         peer_handle = btif_rc_get_connected_peer_handle(btif_av_cb[index].peer_bda);
+
+       if (peer_handle != BTRC_HANDLE_NONE) {
+         BTIF_TRACE_WARNING("%s: RC connected to %s, disc RC too since AV is being aborted",
+                 __func__, btif_av_cb[index].peer_bda.ToString().c_str());
+         BTA_AvCloseRc(peer_handle);
+       }
        BTA_AvClose(btif_av_cb[index].bta_handle);
        btif_queue_advance();
        btif_sm_change_state(btif_av_cb[index].sm_handle, BTIF_AV_STATE_IDLE);
        btif_report_connection_state_to_ba(BTAV_CONNECTION_STATE_DISCONNECTED);
-       break;
+       } break;
 
     case BTA_AV_RC_OPEN_EVT:
        btif_rc_handler(event, (tBTA_AV*)p_data);;
@@ -1575,8 +1599,8 @@ static bool btif_av_state_opened_handler(btif_sm_event_t event, void* p_data,
         (btif_av_cb[index].flags & BTIF_AV_FLAG_LOCAL_SUSPEND_PENDING)) {
         /* Susupend initiated after start to earbuds but in some scenario
          * if one of the earbuds took more time to respond to start req or
-         * earbud suspended for dut initiate start and then sent start againg
-         * We have to suspne stream
+         * earbud sent suspend for dut initiated start and then sent start again
+         * We have to suspend stream
          */
         BTIF_TRACE_DEBUG("%s:Suspending pending for TWS pair",__func__);
         btif_dispatch_sm_event(BTIF_AV_SUSPEND_STREAM_REQ_EVT, NULL, 0);
@@ -1732,7 +1756,7 @@ static bool btif_av_state_opened_handler(btif_sm_event_t event, void* p_data,
     } break;
 
     case BTIF_AV_CONNECT_REQ_EVT: {
-      if (memcmp((RawAddress*)p_data, &(btif_av_cb[index].peer_bda),
+      if (memcmp(((btif_av_connect_req_t*)p_data)->target_bda, &(btif_av_cb[index].peer_bda),
                  sizeof(btif_av_cb[index].peer_bda)) == 0) {
         BTIF_TRACE_DEBUG("%s: Ignore BTIF_AV_CONNECT_REQ_EVT for same device",
                          __func__);
@@ -1982,7 +2006,14 @@ static bool btif_av_state_started_handler(btif_sm_event_t event, void* p_data,
         //TODO check for tws pair
         for(i = 0; i < btif_max_av_clients; i++) {
           state = btif_sm_get_state(btif_av_cb[i].sm_handle);
-          if (state == BTIF_AV_STATE_STARTED)
+          if (state == BTIF_AV_STATE_STARTED
+#if (TWS_ENABLED == TRUE)
+            //Will reach here if TWS+ pair is not in started state
+            || (btif_av_cb[index].tws_device &&
+               i != index && btif_av_cb[i].tws_device &&
+               (btif_av_cb[i].flags & BTIF_AV_FLAG_PENDING_START))
+#endif
+             )
             btif_av_cb[i].flags |= BTIF_AV_FLAG_LOCAL_SUSPEND_PENDING;
         }
       } else {
@@ -2277,6 +2308,11 @@ static bool btif_av_state_started_handler(btif_sm_event_t event, void* p_data,
           BTIF_TRACE_WARNING("%s:is_scrambling_enabled %d",__func__,
                                     is_scrambling_enabled);
 
+          bool is_44p1kFreq_supported = btif_av_is_44p1kFreq_supported();
+
+          BTIF_TRACE_WARNING("%s:is_44p1kFreq_supported %d",__func__,
+                                    is_44p1kFreq_supported);
+
           BTA_AvOffloadStart(btif_av_cb[index].bta_handle, is_scrambling_enabled);
       }
       else if (btif_av_cb[index].remote_started)
@@ -2368,6 +2404,15 @@ static void btif_av_handle_event(uint16_t event, char* p_param) {
       return;
 
     case BTIF_AV_CONNECT_REQ_EVT:
+      if (p_param != NULL) {
+        btif_av_connect_req_t* connect_req_p = (btif_av_connect_req_t*)p_param;
+        bt_addr = connect_req_p->target_bda;
+        index = btif_av_idx_by_bdaddr(bt_addr);
+        if (index == btif_max_av_clients) {
+          index = 0;
+        }
+        BTIF_TRACE_DEBUG("%s: BTIF_AV_CONNECT_REQ_EVT on idx = %d", __func__, index);
+      }
       break;
 
     case BTIF_AV_SOURCE_CONFIG_REQ_EVT:
@@ -2430,6 +2475,11 @@ static void btif_av_handle_event(uint16_t event, char* p_param) {
           active_device_selected = true;
 
       index = btif_av_idx_by_bdaddr(bt_addr);
+      if (index == btif_max_av_clients) {
+        //Device is disconnected before setting it as active device
+        BTIF_TRACE_IMP("%s:Invalid index to set active device",__func__);
+        break;
+      }
       if (active_device_selected == false)
       {
         BTIF_TRACE_IMP("For Null -> Device set current playing and don't trigger handoff");
@@ -2498,6 +2548,16 @@ static void btif_av_handle_event(uint16_t event, char* p_param) {
           return;
       }
       index = btif_av_get_latest_device_idx_to_start();
+#if (TWS_ENABLED == TRUE)
+      if (btif_av_current_device_is_tws()) {
+        int started_index = btif_av_get_latest_playing_device_idx();
+        if (btif_av_stream_started_ready() &&
+          started_index == index) {
+          index = btif_av_get_tws_pair_idx(started_index);
+          BTIF_TRACE_DEBUG("Switching start req from index %d to %d",started_index,index);
+        }
+      }
+#endif
       break;
     case BTIF_AV_STOP_STREAM_REQ_EVT:
     case BTIF_AV_SUSPEND_STREAM_REQ_EVT:
@@ -2670,6 +2730,8 @@ static void btif_av_handle_event(uint16_t event, char* p_param) {
        * Directly call the RC handler as we cannot
        * associate any AV handle to it.
        */
+      BTIF_TRACE_DEBUG("%s: BTA_AV_RC_CLOSE_EVT: peer_addr=%s", __func__,
+                  p_bta_data->rc_close.peer_addr.ToString().c_str());
       index = btif_av_idx_by_bdaddr(&p_bta_data->rc_close.peer_addr);
       if (index == btif_max_av_clients)
         btif_rc_handler(event, (tBTA_AV*)p_bta_data);
@@ -3343,7 +3405,11 @@ static bt_status_t init_src(
   osi_property_get("persist.vendor.btstack.enable.splita2dp", value, "true");
   BTIF_TRACE_ERROR("split_a2dp_status = %s",value);
   bt_split_a2dp_enabled = (strcmp(value, "true") == 0);
-  BTIF_TRACE_ERROR("split_a2dp_status = %d",bt_split_a2dp_enabled);
+  BTIF_TRACE_DEBUG("split_a2dp_status = %d",bt_split_a2dp_enabled);
+  osi_property_get("persist.vendor.btstack.twsplus.defaultchannelmode", value, "mono");
+  BTIF_TRACE_DEBUG("tws default channel mode = %s",value);
+  tws_defaultmono_supported = (strcmp(value, "mono") == 0);
+  BTIF_TRACE_DEBUG("default mono channel mode = %d",tws_defaultmono_supported);
 
   if (bt_av_sink_callbacks != NULL)
         // already did btif_av_init()
@@ -3452,7 +3518,7 @@ void btif_get_latest_playing_device(RawAddress *address) {
         //copy bdaddrsss
     *address = btif_av_cb[index].peer_bda;
   else
-    address = nullptr;
+    *address = RawAddress::kEmpty;
 }
 
 /*******************************************************************************
@@ -4568,6 +4634,34 @@ bool btif_av_is_scrambling_enabled() {
   return false;
 }
 
+/******************************************************************************
+**
+** Function        btif_av_is_44p1kFreq_supported
+**
+** Description     get 44p1kFreq is enabled from bluetooth.
+**
+** Returns         bool
+**
+********************************************************************************/
+bool btif_av_is_44p1kFreq_supported() {
+  uint8_t add_on_features_size = 0;
+  const bt_device_features_t * add_on_features_list = NULL;
+
+  add_on_features_list = controller_get_interface()->get_add_on_features(&add_on_features_size);
+  if (add_on_features_size == 0) {
+    BTIF_TRACE_WARNING(
+        "BT controller doesn't add on features");
+    return false;
+  }
+
+  if (add_on_features_list != NULL) {
+    if (HCI_SPLIT_A2DP_44P1KHZ_SAMPLE_FREQ(add_on_features_list->as_array)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 uint8_t btif_av_get_peer_sep(int index) {
   if (isA2dpSink == true)
     return AVDT_TSEP_SNK;
@@ -5056,6 +5150,7 @@ void btif_av_reset_codec_reconfig_flag() {
 void btif_av_reinit_audio_interface() {
   BTIF_TRACE_DEBUG(LOG_TAG,"btif_av_reint_audio_interface");
   btif_a2dp_audio_interface_init();
+  btif_a2dp_audio_if_init = true;
 }
 
 void btif_av_flow_spec_cmd(int index, int bitrate) {
@@ -5124,6 +5219,48 @@ bool btif_av_current_device_is_tws() {
     }
   }
   return false;
+}
+bool btif_av_is_idx_tws_device(int index) {
+  if (index == btif_max_av_clients) {
+    BTIF_TRACE_ERROR("%s:invalid index",__func__);
+    return false;
+  }
+  BTIF_TRACE_DEBUG("%s:%d",__func__, btif_av_cb[index].tws_device);
+  return btif_av_cb[index].tws_device;
+}
+int btif_av_get_tws_pair_idx(int index) {
+  BTIF_TRACE_DEBUG("%s",__func__);
+  int idx = btif_max_av_clients;
+  if (index == btif_max_av_clients) {
+    BTIF_TRACE_ERROR("%s:invalid index",__func__);
+    return false;
+  }
+  for (idx = 0; idx < btif_max_av_clients; idx++) {
+    if (idx != index && btif_av_cb[idx].tws_device) {
+      BTIF_TRACE_DEBUG("%s:found TWS+ pair index %d",__func__,idx);
+      return idx;
+    }
+  }
+  return idx;
+}
+
+bool btif_av_is_tws_enable_monocfg() {
+  int i,index;
+  BTIF_TRACE_DEBUG("%s",__func__);
+  btif_sm_state_t state = BTIF_AV_STATE_IDLE;
+  RawAddress tws_address_peer;
+  i = btif_av_get_latest_playing_device_idx();
+  if (btif_av_cb[i].tws_device) {
+    if (BTM_SecGetTwsPlusPeerDev(btif_av_cb[i].peer_bda,tws_address_peer)== true) {
+          index = btif_av_idx_by_bdaddr(&tws_address_peer);
+          if (index < btif_max_av_clients) {
+            state = btif_sm_get_state(btif_av_cb[index].sm_handle);
+            if (state == BTIF_AV_STATE_STARTED || (btif_av_cb[index].flags & BTIF_AV_FLAG_PENDING_START))
+               return false;
+          }
+       }
+    }
+  return true;
 }
 #endif
 /*SPLITA2DP*/

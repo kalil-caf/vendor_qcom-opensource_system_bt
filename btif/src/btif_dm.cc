@@ -239,7 +239,7 @@ typedef struct {
 } btif_dm_bl_device_t;
 
 
-#define BTA_SERVICE_ID_TO_SERVICE_MASK(id) (1 << (id))
+#define BTA_SERVICE_ID_TO_SERVICE_MASK(id) (((tBTA_SERVICE_MASK) 1) << (id))
 
 #define MAX_BTIF_BOND_EVENT_ENTRIES 15
 
@@ -1894,9 +1894,6 @@ static void btif_dm_upstreams_evt(uint16_t event, char* p_param) {
         }
       }
 
-      if(twsplus_enabled == true) {
-        btif_in_execute_service_request(BTA_TWS_PLUS_SERVICE_ID, true);
-      }
       /* clear control blocks */
       memset(&pairing_cb, 0, sizeof(btif_dm_pairing_cb_t));
       pairing_cb.bond_type = BOND_TYPE_PERSISTENT;
@@ -1908,6 +1905,8 @@ static void btif_dm_upstreams_evt(uint16_t event, char* p_param) {
 
       btif_tws_plus_load_tws_devices();
 
+      btif_vendor_update_add_on_features();
+
       btif_enable_bluetooth_evt(p_data->enable.status);
     } break;
 
@@ -1918,9 +1917,6 @@ static void btif_dm_upstreams_evt(uint16_t event, char* p_param) {
       if (service_mask &
           (tBTA_SERVICE_MASK)(BTA_SERVICE_ID_TO_SERVICE_MASK(BTA_BLE_SERVICE_ID))) {
         btif_in_execute_service_request(BTA_BLE_SERVICE_ID, FALSE);
-      }
-      if(twsplus_enabled == true) {
-        btif_in_execute_service_request(BTA_TWS_PLUS_SERVICE_ID, false);
       }
       btif_disable_bluetooth_evt();
       break;

@@ -160,6 +160,7 @@ class BtaAvCoCb {
   /* Current codec configuration - access to this variable must be protected */
   uint8_t codec_config[AVDT_CODEC_SIZE];
   tBTA_AV_CO_CP cp;
+  std::vector<btav_a2dp_codec_config_t> default_codec_priorities;
 
   void reset() {
     // TODO: Ugly leftover reset from the original C code. Should go away once
@@ -167,6 +168,7 @@ class BtaAvCoCb {
     memset(peers, 0, sizeof(peers));
     memset(codec_config, 0, sizeof(codec_config));
     memset(&cp, 0, sizeof(cp));
+    default_codec_priorities.clear();
 
     // Initialize the handles
     for (size_t i = 0; i < BTA_AV_CO_NUM_ELEMENTS(peers); i++) {
@@ -776,15 +778,20 @@ void bta_av_co_audio_open(tBTA_AV_HNDL hndl, uint16_t mtu) {
  ******************************************************************************/
 void bta_av_co_audio_close(tBTA_AV_HNDL hndl) {
   tBTA_AV_CO_PEER* p_peer;
+  uint8_t index;
 
-  APPL_TRACE_DEBUG("%s hndl = 0x%x", __func__, hndl);
+  index = BTA_AV_CO_AUDIO_HNDL_TO_INDX(hndl);
+
+  APPL_TRACE_DEBUG("%s hndl = 0x%x, index = %d", __func__, hndl, index);
   btif_av_reset_audio_delay(hndl);
 
   /* Retrieve the peer info */
   p_peer = bta_av_co_get_peer(hndl);
-  if (p_peer) {
+  if (p_peer && (index < BTA_AV_CO_NUM_ELEMENTS(bta_av_co_cb.peers))) {
     /* Mark the peer closed and clean the peer info */
     memset(p_peer, 0, sizeof(*p_peer));
+    APPL_TRACE_DEBUG("%s call bta_av_co_peer_init", __func__);
+    bta_av_co_peer_init(bta_av_co_cb.default_codec_priorities, index);
   } else {
     APPL_TRACE_ERROR("%s: could not find peer entry", __func__);
   }
@@ -958,6 +965,16 @@ static bool bta_av_co_audio_protect_has_scmst(uint8_t num_protect,
   return false;
 }
 
+/*******************************************************************************
+ **
+ ** Function         bta_av_co_audio_is_aac_wl_enabled
+ **
+ ** Description      Check if AAC white-list is enabled or not
+ **
+ ** Returns          returns default value true, false if property is disabled
+ **
+ ******************************************************************************/
+
 bool bta_av_co_audio_is_aac_wl_enabled(RawAddress *remote_bdaddr) {
 
   int retval;
@@ -968,9 +985,32 @@ bool bta_av_co_audio_is_aac_wl_enabled(RawAddress *remote_bdaddr) {
                                   __func__, is_whitelist_by_default, retval);
   if (!strncmp(is_whitelist_by_default, "true", 4)) {
       res = TRUE;
-    }
+  }
+  return res;
+}
 
-    return res;
+/*******************************************************************************
+ **
+ ** Function         bta_av_co_audio_device_addr_check_is_enabled
+ **
+ ** Description      Check if address based property is enabled or not
+ **
+ ** Returns          returns default value true, false if property is disabled
+ **
+ ******************************************************************************/
+
+bool bta_av_co_audio_device_addr_check_is_enabled(RawAddress *remote_bdaddr) {
+
+  int retval;
+  bool res = FALSE;
+  char is_addr_check_enabled_by_default[255] = "false";
+  retval = property_get("persist.vendor.bt.a2dp.addr_check_enabled_for_aac", is_addr_check_enabled_by_default, "true");
+  BTIF_TRACE_DEBUG("%s: property_get: bt.a2dp.addr_check_enabled_for_aac: %s, retval: %d",
+                                  __func__, is_addr_check_enabled_by_default, retval);
+  if (!strncmp(is_addr_check_enabled_by_default, "true", 4)) {
+      res = TRUE;
+  }
+  return res;
 }
 
 /*******************************************************************************
@@ -1054,21 +1094,42 @@ static tBTA_AV_CO_SINK* bta_av_co_audio_set_codec(tBTA_AV_CO_PEER* p_peer) {
 #endif
     if (!strcmp(iter->name().c_str(),"AAC")) {
       if (bta_av_co_audio_is_aac_wl_enabled(&p_peer->addr)) {
-        if (btif_storage_get_stored_remote_name(p_peer->addr, remote_name) &&
-            interop_match_addr(INTEROP_ENABLE_AAC_CODEC, &p_peer->addr) &&
-            interop_match_name(INTEROP_ENABLE_AAC_CODEC, remote_name)) {
-          APPL_TRACE_DEBUG("%s: AAC is supported for this WL remote device", __func__);
-          p_sink = bta_av_co_audio_codec_selected(*iter, p_peer);
-        } else {
-          APPL_TRACE_DEBUG("%s: RD is not present in name and address based check for AAC or WL disabled.",
+        if (bta_av_co_audio_device_addr_check_is_enabled(&p_peer->addr)) {
+          if (btif_storage_get_stored_remote_name(p_peer->addr, remote_name) &&
+              interop_match_addr(INTEROP_ENABLE_AAC_CODEC, &p_peer->addr) &&
+              interop_match_name(INTEROP_ENABLE_AAC_CODEC, remote_name)) {
+            APPL_TRACE_DEBUG("%s: AAC is supported for this WL remote device", __func__);
+            p_sink = bta_av_co_audio_codec_selected(*iter, p_peer);
+          } else {
+            APPL_TRACE_DEBUG("%s: RD is not present in name and address based check for AAC WL.",
                                __func__);
+          }
+        } else {
+          if (btif_storage_get_stored_remote_name(p_peer->addr, remote_name) &&
+              interop_match_name(INTEROP_ENABLE_AAC_CODEC, remote_name)) {
+            APPL_TRACE_DEBUG("%s: AAC is supported for this WL remote device", __func__);
+            p_sink = bta_av_co_audio_codec_selected(*iter, p_peer);
+          } else {
+            APPL_TRACE_DEBUG("%s: RD is not present in name based check for AAC WL.",
+                              __func__);
+          }
         }
       } else {
-        if (interop_match_addr_or_name(INTEROP_DISABLE_AAC_CODEC, &p_peer->addr)) {
-          APPL_TRACE_DEBUG("AAC is not supported for this BL remote device");
+        if (bta_av_co_audio_device_addr_check_is_enabled(&p_peer->addr)) {
+          if (interop_match_addr_or_name(INTEROP_DISABLE_AAC_CODEC, &p_peer->addr)) {
+            APPL_TRACE_DEBUG("AAC is not supported for this BL remote device");
+          } else {
+            APPL_TRACE_DEBUG("%s: AAC is supported for this remote device", __func__);
+            p_sink = bta_av_co_audio_codec_selected(*iter, p_peer);
+          }
         } else {
-          APPL_TRACE_DEBUG("%s: AAC is supported for this remote device", __func__);
-          p_sink = bta_av_co_audio_codec_selected(*iter, p_peer);
+          if (btif_storage_get_stored_remote_name(p_peer->addr, remote_name) &&
+              interop_match_name(INTEROP_DISABLE_AAC_CODEC, remote_name)) {
+            APPL_TRACE_DEBUG("AAC is not supported for this BL remote device");
+          } else {
+            APPL_TRACE_DEBUG("%s: AAC is supported for this remote device", __func__);
+            p_sink = bta_av_co_audio_codec_selected(*iter, p_peer);
+          }
         }
       }
     } else {
@@ -1668,6 +1729,25 @@ bool bta_av_co_is_scrambling_enabled() {
   return true;
 }
 
+bool bta_av_co_is_44p1kFreq_enabled() {
+  uint8_t add_on_features_size = 0;
+  const bt_device_features_t * add_on_features_list = NULL;
+
+  add_on_features_list = controller_get_interface()->get_add_on_features(&add_on_features_size);
+  if (add_on_features_size == 0) {
+    BTIF_TRACE_WARNING(
+        "BT controller doesn't add on features");
+    return false;
+  }
+
+  if (add_on_features_list != NULL) {
+    if (HCI_SPLIT_A2DP_44P1KHZ_SAMPLE_FREQ(add_on_features_list->as_array)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 void bta_av_co_init(
     const std::vector<btav_a2dp_codec_config_t>& codec_priorities) {
   APPL_TRACE_DEBUG("%s", __func__);
@@ -1688,8 +1768,9 @@ void bta_av_co_init(
 /* SPLITA2DP */
   bool a2dp_offload = btif_av_is_split_a2dp_enabled();
   bool isScramblingSupported = bta_av_co_is_scrambling_enabled();
+  bool is44p1kFreqSupported = bta_av_co_is_44p1kFreq_enabled();
   osi_property_get("persist.vendor.btstack.a2dp_offload_cap", value, "false");
-  A2DP_SetOffloadStatus(a2dp_offload, value, isScramblingSupported);
+  A2DP_SetOffloadStatus(a2dp_offload, value, isScramblingSupported, is44p1kFreqSupported);
 /* SPLITA2DP */
   bool isMcastSupported = btif_av_is_multicast_supported();
   bool isShoSupported = (btif_max_av_clients > 1) ? true : false;
@@ -1708,6 +1789,7 @@ void bta_av_co_init(
     p_peer->isIncoming = false;
   }
   A2DP_InitDefaultCodec(bta_av_co_cb.codec_config);
+  bta_av_co_cb.default_codec_priorities = codec_priorities;
   mutex_global_unlock();
 
   // NOTE: Unconditionally dispatch the event to make sure a callback with
